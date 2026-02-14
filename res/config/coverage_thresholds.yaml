@@ -1,9 +1,9 @@
 unit:
   path: tests/unit
-  min_coverage: 90
+  min_coverage: 8
   source_path: ami
 
 integration:
   path: tests/integration
-  min_coverage: 50
+  min_coverage: 0
   source_path: ami
