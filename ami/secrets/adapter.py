@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any
@@ -25,7 +26,17 @@ _POINTER_CONTEXT: ContextVar[dict[str, VaultFieldPointer] | None] = ContextVar(
 )
 
 
-def prepare_instance_for_storage(
+@contextlib.contextmanager
+def pointer_context() -> Generator[None, None, None]:
+    """Context manager that ensures ``_POINTER_CONTEXT`` is cleaned up."""
+    _POINTER_CONTEXT.set(None)
+    try:
+        yield
+    finally:
+        _POINTER_CONTEXT.set(None)
+
+
+async def prepare_instance_for_storage(
     instance: Any,
     data: dict[str, Any],
     context: SecurityContext | None = None,
@@ -72,7 +83,7 @@ def prepare_instance_for_storage(
             payload[field_name] = cached_pointer.to_storage()
             continue
 
-        pointer = client.ensure_secret(
+        pointer = await client.ensure_secret(
             namespace=config.namespace or namespace_default,
             model=instance.__class__.__name__,
             field=field_name,
@@ -92,7 +103,7 @@ def prepare_instance_for_storage(
     return payload
 
 
-def hydrate_sensitive_fields(
+async def hydrate_sensitive_fields(
     model_cls: type[Any],
     data: dict[str, Any],
     context: SecurityContext | None = None,
@@ -116,7 +127,7 @@ def hydrate_sensitive_fields(
             continue
 
         pointer = VaultFieldPointer.model_validate(value)
-        secret_value, integrity_hash = client.retrieve_secret(
+        secret_value, integrity_hash = await client.retrieve_secret(
             pointer.vault_reference,
         )
         if integrity_hash != pointer.integrity_hash:

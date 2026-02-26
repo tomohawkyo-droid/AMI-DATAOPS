@@ -1,4 +1,4 @@
-"""UnifiedCRUD — persistence logic for StorageModel instances."""
+"""UnifiedCRUD -- persistence logic for StorageModel instances."""
 
 from __future__ import annotations
 
@@ -186,7 +186,7 @@ class UnifiedCRUD:
             raise ValueError(msg)
         dao = await self._get_dao(model, config_index)
         model.updated_at = datetime.now(UTC)
-        await dao.update(model.uid, model.to_storage_dict())
+        await dao.update(model.uid, await model.to_storage_dict())
 
     async def delete(
         self,
@@ -231,6 +231,12 @@ class UnifiedCRUD:
         if uid in self._uid_registry:
             model_class, config_index = self._uid_registry[uid]
             return await self.read(model_class, uid, config_index)
+        # Fallback: scan all cached DAOs for the UID
+        for (model_class, config_index), dao in self._dao_cache.items():
+            result: StorageModel | None = await dao.find_by_id(uid)
+            if result is not None:
+                self._uid_registry[uid] = (model_class, config_index)
+                return result
         return None
 
     async def delete_by_uid(self, uid: str) -> bool:

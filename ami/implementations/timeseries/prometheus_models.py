@@ -7,14 +7,31 @@ converting between dict-based queries and PromQL selectors.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from pydantic import Field
 
+from ami.core.exceptions import StorageValidationError
 from ami.models.base_model import ModelMetadata, StorageModel
 
 logger = logging.getLogger(__name__)
+
+_PROMQL_LABEL_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _escape_promql_value(value: str) -> str:
+    """Escape special characters in a PromQL label value."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _validate_promql_label(key: str) -> None:
+    """Validate a PromQL label name."""
+    if not _PROMQL_LABEL_RE.match(key):
+        msg = f"Invalid PromQL label name: {key!r}"
+        raise StorageValidationError(msg)
+
 
 # Minimum number of elements in a timestamp-value pair [timestamp, value]
 _MIN_TS_VAL_LEN = 2
@@ -49,7 +66,9 @@ class PrometheusMetric(StorageModel):
         """
         if not self.labels:
             return self.metric_name
-        parts = [f'{k}="{v}"' for k, v in sorted(self.labels.items())]
+        parts = [
+            f'{k}="{_escape_promql_value(v)}"' for k, v in sorted(self.labels.items())
+        ]
         return f"{self.metric_name}{{{','.join(parts)}}}"
 
     def to_exposition_line(self) -> str:
@@ -72,7 +91,7 @@ class PromQLBuilder:
         """Build an instant query selector."""
         if not labels:
             return metric
-        parts = [f'{k}="{v}"' for k, v in sorted(labels.items())]
+        parts = [f'{k}="{_escape_promql_value(v)}"' for k, v in sorted(labels.items())]
         return f"{metric}{{{','.join(parts)}}}"
 
     @staticmethod
@@ -127,8 +146,9 @@ def _build_dict_selector(
     value: Any,
 ) -> str | None:
     """Build a single label selector from a dict operator."""
+    _validate_promql_label(key)
     if "$ne" in value:
-        return f'{key}!="{value["$ne"]}"'
+        return f'{key}!="{_escape_promql_value(str(value["$ne"]))}"'
     if "$regex" in value:
         _validate_regex_pattern(value["$regex"])
         return f'{key}=~"{value["$regex"]}"'
@@ -171,7 +191,8 @@ def dict_query_to_promql(
             if selector:
                 label_selectors.append(selector)
         else:
-            label_selectors.append(f'{key}="{value}"')
+            _validate_promql_label(key)
+            label_selectors.append(f'{key}="{_escape_promql_value(str(value))}"')
 
     if not label_selectors:
         return metric_name

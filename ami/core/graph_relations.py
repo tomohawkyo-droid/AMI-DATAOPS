@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
+from typing import Any, TypeVar, Union, cast, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel
 
 T = TypeVar("T")
+
+
+def _escape_dql_value(value: Any) -> str:
+    """Escape a value for safe interpolation into a DQL string literal."""
+    text = str(value)
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 class GraphRelation:
@@ -103,9 +109,10 @@ class GraphSchemaAnalyzer:
         else:
             target_type = base_type
 
-        # FIX: check target_type directly instead of get_origin
-        if target_type is type(None):
-            target_type = get_args(target_type)[0] if get_args(target_type) else str
+        # Resolve Optional[T] → T
+        if get_origin(target_type) is Union:
+            args = [a for a in get_args(target_type) if a is not type(None)]
+            target_type = args[0] if args else str
 
         if graph_relation.target_type:
             target_type = graph_relation.target_type
@@ -336,7 +343,11 @@ class GraphQueryBuilder:
         lines = ["{"]
         if self.filters:
             func_parts = [
-                f'eq({self.model_cls.__name__}.{f["field"]}, "{f["value"]}")'
+                'eq({}.{}, "{}")'.format(
+                    self.model_cls.__name__,
+                    f["field"],
+                    _escape_dql_value(f["value"]),
+                )
                 for f in self.filters
             ]
             func = " AND ".join(func_parts)

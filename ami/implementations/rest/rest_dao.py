@@ -13,7 +13,7 @@ from typing import Any
 import aiohttp
 
 from ami.core.dao import BaseDAO
-from ami.core.exceptions import StorageError
+from ami.core.exceptions import QueryError, StorageConnectionError, StorageError
 from ami.models.base_model import StorageModel
 from ami.models.storage_config import StorageConfig
 from ami.utils.http_client import request_with_retry
@@ -108,10 +108,15 @@ class RestDAO(BaseDAO):
     def _extract_data(self, response_json: Any) -> Any:
         """Extract data payload from response JSON.
 
-        Handles common REST envelope patterns like
-        ``{"data": ...}`` or ``{"results": ...}``.
+        Uses ``response_data_key`` from config options if set,
+        otherwise probes common envelope patterns.
         """
         if isinstance(response_json, dict):
+            # Use explicit config key if provided
+            if self.config and self.config.options:
+                data_key = self.config.options.get("response_data_key")
+                if data_key and data_key in response_json:
+                    return response_json[data_key]
             for key in ("data", "results", "items", "records"):
                 if key in response_json:
                     return response_json[key]
@@ -143,7 +148,9 @@ class RestDAO(BaseDAO):
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             await self.connect()
-        assert self.session is not None
+        if self.session is None:
+            msg = "Failed to establish REST session"
+            raise StorageConnectionError(msg)
         return self.session
 
     # ------------------------------------------------------------------
@@ -154,7 +161,7 @@ class RestDAO(BaseDAO):
         """POST a new resource."""
         session = await self._ensure_session()
         if isinstance(instance, StorageModel):
-            data = instance.to_storage_dict()
+            data = await instance.to_storage_dict()
         elif isinstance(instance, dict):
             data = instance
         else:
@@ -175,8 +182,13 @@ class RestDAO(BaseDAO):
             result = await resp.json()
         extracted = self._extract_data(result)
         if isinstance(extracted, dict):
-            return str(extracted.get("uid") or extracted.get("id", ""))
-        return str(extracted)
+            item_id = extracted.get("uid") or extracted.get("id")
+        else:
+            item_id = extracted
+        if item_id is None:
+            msg = "REST API returned no ID for created resource"
+            raise QueryError(msg)
+        return str(item_id)
 
     async def find_by_id(self, item_id: str) -> Any | None:
         """GET a single resource by ID."""
@@ -194,7 +206,7 @@ class RestDAO(BaseDAO):
         data = self._extract_data(result)
         if isinstance(data, dict):
             data = self._map_fields(data)
-            return self.model_cls.from_storage_dict(data)
+            return await self.model_cls.from_storage_dict(data)
         return data
 
     async def find_one(self, query: dict[str, Any]) -> Any | None:
@@ -232,7 +244,7 @@ class RestDAO(BaseDAO):
         for item in items:
             if isinstance(item, dict):
                 mapped_item = self._map_fields(item)
-                output.append(self.model_cls.from_storage_dict(mapped_item))
+                output.append(await self.model_cls.from_storage_dict(mapped_item))
             else:
                 output.append(item)
         return output
@@ -271,18 +283,15 @@ class RestDAO(BaseDAO):
         session = await self._ensure_session()
         params = {k: str(v) for k, v in query.items()}
         url = self._build_url(path="count")
-        try:
-            resp = await request_with_retry(session, "GET", url, params=params)
-            async with resp:
-                if resp.status == HTTP_OK:
-                    result = await resp.json()
-                    extracted = self._extract_data(result)
-                    if isinstance(extracted, int):
-                        return extracted
-                    if isinstance(extracted, dict):
-                        return int(extracted.get("count", 0))
-        except StorageError:
-            pass
+        resp = await request_with_retry(session, "GET", url, params=params)
+        async with resp:
+            if resp.status == HTTP_OK:
+                result = await resp.json()
+                extracted = self._extract_data(result)
+                if isinstance(extracted, int):
+                    return extracted
+                if isinstance(extracted, dict):
+                    return int(extracted.get("count", 0))
         # Fallback: fetch all and count
         items = await self.find(query)
         return len(items)

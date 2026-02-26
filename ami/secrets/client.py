@@ -2,33 +2,42 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import os
-import threading
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
-from urllib.request import urlopen as _safe_urlopen
 
+import aiohttp
 from pydantic import BaseModel, ConfigDict
 
+from ami.core.exceptions import ConfigurationError
 from ami.secrets.pointer import VaultFieldPointer
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MASTER_KEY = os.getenv(
-    "DATAOPS_VAULT_MASTER_KEY",
-    "dev-master-key",
-).encode()
-_PUBLIC_INTEGRITY_SALT = os.getenv(
-    "DATAOPS_VAULT_INTEGRITY_SALT",
-    "ami-integrity-salt",
-).encode()
+
+def _get_master_key() -> bytes:
+    """Read master key from environment. Raises on missing."""
+    value = os.getenv("DATAOPS_MASTER_KEY")
+    if not value:
+        msg = "Required: DATAOPS_MASTER_KEY environment variable"
+        raise ConfigurationError(msg)
+    return value.encode()
+
+
+def _get_integrity_salt() -> bytes:
+    """Read integrity salt from environment. Raises on missing."""
+    value = os.getenv("DATAOPS_INTEGRITY_SALT")
+    if not value:
+        msg = "Required: DATAOPS_INTEGRITY_SALT environment variable"
+        raise ConfigurationError(msg)
+    return value.encode()
+
+
 _DEFAULT_BROKER_URL = os.getenv("SECRETS_BROKER_URL") or os.getenv(
     "DATAOPS_SECRETS_BROKER_URL"
 )
@@ -43,14 +52,14 @@ _HTTP_UNAUTHORIZED = 401
 
 def compute_integrity_hash(value: str) -> str:
     """Compute the public integrity hash for a secret value."""
-    digest = hmac.new(_PUBLIC_INTEGRITY_SALT, value.encode(), "sha256")
+    digest = hmac.new(_get_integrity_salt(), value.encode(), "sha256")
     return digest.hexdigest()
 
 
 class SecretsBrokerBackend(Protocol):
     """Protocol describing broker backend operations."""
 
-    def ensure_secret(
+    async def ensure_secret(
         self,
         *,
         namespace: str,
@@ -60,10 +69,10 @@ class SecretsBrokerBackend(Protocol):
         classification: Any | None = None,
     ) -> VaultFieldPointer: ...
 
-    def retrieve_secret(self, reference: str) -> tuple[str, str]:
+    async def retrieve_secret(self, reference: str) -> tuple[str, str]:
         """Return secret value and integrity hash."""
 
-    def delete_secret(self, reference: str) -> None: ...
+    async def delete_secret(self, reference: str) -> None: ...
 
 
 class _SecretRecord(BaseModel):
@@ -81,11 +90,11 @@ class InMemorySecretsBackend:
     """Development backend that simulates broker-side behaviour."""
 
     def __init__(self, master_key: bytes | None = None) -> None:
-        self._master_key = master_key or DEFAULT_MASTER_KEY
+        self._master_key = master_key or _get_master_key()
         self._records: dict[str, _SecretRecord] = {}
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def ensure_secret(
+    async def ensure_secret(
         self,
         *,
         namespace: str,
@@ -105,7 +114,7 @@ class InMemorySecretsBackend:
                 field,
             )
 
-        with self._lock:
+        async with self._lock:
             record = self._records.get(reference)
             if record and record.integrity_hash == integrity_hash:
                 record.updated_at = datetime.now(tz=UTC)
@@ -138,16 +147,16 @@ class InMemorySecretsBackend:
                 updated_at=updated_at,
             )
 
-    def retrieve_secret(self, reference: str) -> tuple[str, str]:
-        with self._lock:
+    async def retrieve_secret(self, reference: str) -> tuple[str, str]:
+        async with self._lock:
             record = self._records.get(reference)
             if not record:
                 msg = f"Unknown vault reference: {reference}"
                 raise KeyError(msg)
             return record.value, record.integrity_hash
 
-    def delete_secret(self, reference: str) -> None:
-        with self._lock:
+    async def delete_secret(self, reference: str) -> None:
+        async with self._lock:
             self._records.pop(reference, None)
 
     def _derive_reference(
@@ -163,7 +172,7 @@ class InMemorySecretsBackend:
 
 
 class HTTPSecretsBrokerBackend:
-    """HTTP client that talks to the broker service."""
+    """Async HTTP client that talks to the broker service."""
 
     def __init__(
         self,
@@ -177,9 +186,9 @@ class HTTPSecretsBrokerBackend:
             raise ValueError(msg)
         self._base_url = base_url.rstrip("/")
         self._token = token
-        self._timeout = timeout
+        self._timeout = aiohttp.ClientTimeout(total=timeout)
 
-    def ensure_secret(
+    async def ensure_secret(
         self,
         *,
         namespace: str,
@@ -200,12 +209,12 @@ class HTTPSecretsBrokerBackend:
                 "value",
                 str(classification),
             )
-        data = self._request("POST", "/v1/secrets/ensure", payload)
+        data = await self._request("POST", "/v1/secrets/ensure", payload)
         return VaultFieldPointer.model_validate(data)
 
-    def retrieve_secret(self, reference: str) -> tuple[str, str]:
-        payload = {"vault_reference": reference}
-        data = self._request("POST", "/v1/secrets/retrieve", payload)
+    async def retrieve_secret(self, reference: str) -> tuple[str, str]:
+        payload: dict[str, str] = {"vault_reference": reference}
+        data = await self._request("POST", "/v1/secrets/retrieve", payload)
         value = data.get("value")
         integrity_hash = data.get("integrity_hash")
         if not isinstance(value, str) or not isinstance(
@@ -216,55 +225,48 @@ class HTTPSecretsBrokerBackend:
             raise TypeError(msg)
         return value, integrity_hash
 
-    def delete_secret(self, reference: str) -> None:
-        self._request("DELETE", f"/v1/secrets/{reference}")
+    async def delete_secret(self, reference: str) -> None:
+        await self._request("DELETE", f"/v1/secrets/{reference}")
 
-    def _request(
+    async def _request(
         self,
         method: str,
         path: str,
         payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            msg = f"Invalid URL scheme: {parsed.scheme}"
-            raise ValueError(msg)
-        body: bytes | None = None
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if payload is not None:
-            body = json.dumps(payload).encode()
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers=headers,
-            method=method,
-        )
 
-        try:
-            with _safe_urlopen(
-                request,
-                timeout=self._timeout,
-            ) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            if (
-                exc.code == _HTTP_NOT_FOUND
-                and method == "POST"
-                and path == "/v1/secrets/retrieve"
-                and payload is not None
-            ):
-                raise KeyError(payload["vault_reference"]) from exc
-            if exc.code == _HTTP_UNAUTHORIZED:
-                msg = "Secrets broker rejected credentials"
-                raise PermissionError(msg) from exc
-            msg = f"Secrets broker request failed with status {exc.code}"
-            raise RuntimeError(msg) from exc
-        except urllib.error.URLError as exc:
-            msg = "Unable to reach secrets broker"
-            raise ConnectionError(msg) from exc
+        json_payload = dict(payload) if payload is not None else None
+
+        async with aiohttp.ClientSession(
+            timeout=self._timeout,
+        ) as session:
+            try:
+                async with session.request(
+                    method,
+                    url,
+                    json=json_payload,
+                    headers=headers,
+                ) as resp:
+                    if (
+                        resp.status == _HTTP_NOT_FOUND
+                        and method == "POST"
+                        and path == "/v1/secrets/retrieve"
+                        and payload is not None
+                    ):
+                        msg = str(payload["vault_reference"])
+                        raise KeyError(msg)
+                    if resp.status == _HTTP_UNAUTHORIZED:
+                        msg = "Secrets broker rejected credentials"
+                        raise PermissionError(msg)
+                    resp.raise_for_status()
+                    raw = await resp.read()
+            except aiohttp.ClientError as exc:
+                msg = "Unable to reach secrets broker"
+                raise ConnectionError(msg) from exc
 
         if not raw:
             return {}
@@ -284,7 +286,7 @@ class SecretsBrokerClient:
     ) -> None:
         self._backend = backend or _build_default_backend()
 
-    def ensure_secret(
+    async def ensure_secret(
         self,
         *,
         namespace: str,
@@ -293,7 +295,7 @@ class SecretsBrokerClient:
         value: str,
         classification: Any | None = None,
     ) -> VaultFieldPointer:
-        return self._backend.ensure_secret(
+        return await self._backend.ensure_secret(
             namespace=namespace,
             model=model,
             field=field,
@@ -301,11 +303,11 @@ class SecretsBrokerClient:
             classification=classification,
         )
 
-    def retrieve_secret(self, reference: str) -> tuple[str, str]:
-        return self._backend.retrieve_secret(reference)
+    async def retrieve_secret(self, reference: str) -> tuple[str, str]:
+        return await self._backend.retrieve_secret(reference)
 
-    def delete_secret(self, reference: str) -> None:
-        self._backend.delete_secret(reference)
+    async def delete_secret(self, reference: str) -> None:
+        await self._backend.delete_secret(reference)
 
 
 class _ClientState:

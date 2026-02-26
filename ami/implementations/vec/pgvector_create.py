@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from uuid_utils import uuid7
 
+from ami.core.exceptions import StorageConnectionError
 from ami.implementations.vec.pgvector_util import (
     get_safe_table_name,
     infer_column_type,
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 async def create(dao: PgVectorDAO, instance: Any) -> str:
     """Insert a single record and return its UID."""
-    data = _prepare_data(dao, instance)
+    data = await _prepare_data(dao, instance)
     uid = data.get("uid") or str(uuid7())
     data["uid"] = uid
 
@@ -41,7 +42,9 @@ async def create(dao: PgVectorDAO, instance: Any) -> str:
     sql = f"INSERT INTO {table} ({col_list}) VALUES ({params})"
     values = [serialize_value(data[c]) for c in columns]
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         await conn.execute(sql, *values)
 
@@ -66,10 +69,10 @@ async def bulk_create(dao: PgVectorDAO, instances: list[Any]) -> list[str]:
 # ------------------------------------------------------------------
 
 
-def _prepare_data(dao: PgVectorDAO, instance: Any) -> dict[str, Any]:
+async def _prepare_data(dao: PgVectorDAO, instance: Any) -> dict[str, Any]:
     """Convert an instance to a storage dict."""
     if isinstance(instance, StorageModel):
-        data = instance.to_storage_dict()
+        data = await instance.to_storage_dict()
     elif isinstance(instance, dict):
         data = dict(instance)
     else:
@@ -101,7 +104,9 @@ async def _ensure_table(
 
     ddl = "CREATE TABLE IF NOT EXISTS {} ({})".format(table, ", ".join(col_defs))
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         await conn.execute(ddl)

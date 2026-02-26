@@ -3,9 +3,11 @@
 import logging
 import re
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any, get_args, get_origin
+from uuid import UUID
 
 from uuid_utils import uuid7
 
@@ -34,7 +36,6 @@ def convert_datetime_strings_for_timestamps(
         "expires_at",
         "deleted_at",
         "last_accessed_at",
-        "accessed_at",
         "started_at",
         "ended_at",
     }
@@ -95,6 +96,20 @@ def _strip_optional(annotation: Any) -> Any:
     return origin
 
 
+_PY_TO_SQL: dict[type, str] = {
+    bool: "BOOLEAN",
+    int: "BIGINT",
+    float: "DOUBLE PRECISION",
+    Decimal: "NUMERIC",
+    datetime: "TIMESTAMPTZ",
+    date: "DATE",
+    UUID: "UUID",
+    bytes: "BYTEA",
+    dict: "JSONB",
+    list: "JSONB",
+}
+
+
 def _annotation_to_sql_type(annotation: Any) -> str:
     """Map a Pydantic field annotation to a PostgreSQL column type."""
     origin_hint = get_origin(annotation)
@@ -104,24 +119,15 @@ def _annotation_to_sql_type(annotation: Any) -> str:
     origin = get_origin(resolved)
     if origin:
         resolved = origin
-
-    result = "TEXT"
-    if resolved is bool:
-        result = "BOOLEAN"
-    elif resolved is int:
-        result = "BIGINT"
-    elif resolved is float:
-        result = "DOUBLE PRECISION"
-    elif resolved is datetime:
-        result = "TIMESTAMPTZ"
-    elif resolved is dict or resolved is list:
-        result = "JSONB"
-    elif isinstance(resolved, type) and issubclass(resolved, Enum):
-        result = "TEXT"
-
     if resolved is None:
-        result = "TEXT"
-    return result
+        return "TEXT"
+
+    result = _PY_TO_SQL.get(resolved)
+    if result is not None:
+        return result
+    if isinstance(resolved, type) and issubclass(resolved, Enum):
+        return "TEXT"
+    return "TEXT"
 
 
 def _get_model_defined_columns(dao: Any) -> dict[str, str]:
@@ -329,11 +335,17 @@ async def create(dao: Any, data: dict[str, Any]) -> str:
         if "data" in existing_names and "data" not in data:
             data["data"] = {}
 
+        skipped: list[str] = []
         for i, (key, value) in enumerate(data.items(), 1):
             if is_valid_identifier(key):
                 columns.append(key)
                 values.append(serialize_value(value))
                 param_markers.append(f"${i}")
+            else:
+                skipped.append(key)
+
+        if skipped:
+            logger.warning("Skipped invalid field names: %s", skipped)
 
         update_cols = [
             f"{col} = EXCLUDED.{col}"

@@ -102,8 +102,8 @@ class BaseDAO(ABC):
         """Bulk update multiple records."""
 
     @abstractmethod
-    async def bulk_delete(self, ids: list[str]) -> dict[str, Any] | int:
-        """Bulk delete multiple records."""
+    async def bulk_delete(self, ids: list[str]) -> int:
+        """Bulk delete multiple records. Returns count of deleted records."""
 
     # ------------------------------------------------------------------
     # Schema introspection
@@ -223,7 +223,7 @@ class BaseDAO(ABC):
 
 
 # ======================================================================
-# DAO Registry — simple dict-based registry (no external dependencies)
+# DAO Registry -- simple dict-based registry (no external dependencies)
 # ======================================================================
 
 _dao_registry: dict[StorageType, type[BaseDAO]] = {}

@@ -7,29 +7,17 @@ secrets engine.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
+from hvac import Client as OpenBaoClient
+from hvac.exceptions import VaultError as OpenBaoError
 from uuid_utils import uuid7
 
 from ami.core.dao import BaseDAO
-from ami.core.exceptions import StorageError
+from ami.core.exceptions import StorageConnectionError, StorageError
 from ami.models.storage_config import StorageConfig
-
-# Deferred import: the openbao client may not be installed in every
-# environment.  The default values let the module load without error;
-# actual usage of OpenBaoDAO.connect() will raise StorageError if the
-# client is missing.
-OpenBaoClient: type[Any] | None = None
-OpenBaoError: type[Exception] = Exception
-try:
-    from openbao import Client as _Cli
-    from openbao.exceptions import OpenBaoError as _Err
-
-    OpenBaoClient = _Cli
-    OpenBaoError = _Err
-except Exception:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +51,8 @@ class OpenBaoDAO(BaseDAO):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    _SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$")
+
     def _reference(self, item_id: str) -> str:
         """Build the vault path for a given item ID.
 
@@ -72,6 +62,7 @@ class OpenBaoDAO(BaseDAO):
             ".." in item_id
             or item_id.startswith("/")
             or any(ord(c) < _MIN_PRINTABLE_ORD for c in item_id)
+            or not self._SAFE_PATH_RE.match(item_id)
         ):
             msg = f"Invalid item ID for vault reference: {item_id!r}"
             raise StorageError(msg)
@@ -90,10 +81,6 @@ class OpenBaoDAO(BaseDAO):
 
     async def connect(self) -> None:
         """Connect to OpenBao/Vault."""
-        if OpenBaoClient is None:
-            msg = "OpenBaoClient is not available. Install the ami.secrets package."
-            raise StorageError(msg)
-
         if self.client is not None:
             return
 
@@ -101,8 +88,10 @@ class OpenBaoDAO(BaseDAO):
             url = ""
             token = ""
             if self.config:
-                is_default = self.config.port == _VAULT_DEFAULT_PORT
-                protocol = "https" if is_default else "http"
+                use_tls = True
+                if self.config.options:
+                    use_tls = self.config.options.get("tls", True)
+                protocol = "https" if use_tls else "http"
                 url = (
                     self.config.connection_string
                     or f"{protocol}://{self.config.host}:{self.config.port}"
@@ -135,7 +124,7 @@ class OpenBaoDAO(BaseDAO):
                 client.sys.read_health_status()
             elif hasattr(client, "is_authenticated"):
                 return bool(client.is_authenticated())
-        except Exception:
+        except OpenBaoError:
             logger.exception("OpenBao connection test failed")
             return False
         else:
@@ -150,7 +139,7 @@ class OpenBaoDAO(BaseDAO):
         client = self._ensure_client()
 
         if hasattr(instance, "to_storage_dict"):
-            data = instance.to_storage_dict()
+            data = await instance.to_storage_dict()
         elif isinstance(instance, dict):
             data = instance.copy()
         else:
@@ -198,7 +187,7 @@ class OpenBaoDAO(BaseDAO):
         )
         if not secret_data:
             return None
-        return self.model_cls.from_storage_dict(secret_data)
+        return await self.model_cls.from_storage_dict(secret_data)
 
     async def find_one(self, query: dict[str, Any]) -> Any | None:
         """Find a single secret matching *query*."""
@@ -222,8 +211,9 @@ class OpenBaoDAO(BaseDAO):
                 path=self.collection_name,
                 mount_point=self._mount,
             )
-        except OpenBaoError:
-            return []
+        except OpenBaoError as e:
+            msg = f"Failed to list secrets at {self.collection_name}: {e}"
+            raise StorageConnectionError(msg) from e
 
         keys: list[str] = (
             response.get("data", {}).get("keys", [])
@@ -238,13 +228,12 @@ class OpenBaoDAO(BaseDAO):
             if item is None:
                 continue
             if query:
-                item_dict = (
-                    item.to_storage_dict()
-                    if hasattr(item, "to_storage_dict")
-                    else item
-                    if isinstance(item, dict)
-                    else {}
-                )
+                if hasattr(item, "to_storage_dict"):
+                    item_dict = await item.to_storage_dict()
+                elif isinstance(item, dict):
+                    item_dict = item
+                else:
+                    item_dict = {}
                 if not all(item_dict.get(k) == v for k, v in query.items()):
                     continue
             results.append(item)
@@ -263,13 +252,12 @@ class OpenBaoDAO(BaseDAO):
             msg = f"Secret not found: {item_id}"
             raise StorageError(msg)
 
-        merged = (
-            existing.to_storage_dict()
-            if hasattr(existing, "to_storage_dict")
-            else existing
-            if isinstance(existing, dict)
-            else {}
-        )
+        if hasattr(existing, "to_storage_dict"):
+            merged = await existing.to_storage_dict()
+        elif isinstance(existing, dict):
+            merged = existing
+        else:
+            merged = {}
         merged.update(data)
         merged["updated_at"] = datetime.now(UTC).isoformat()
 
@@ -422,8 +410,9 @@ class OpenBaoDAO(BaseDAO):
                 else []
             )
             return [k.rstrip("/") for k in keys]
-        except OpenBaoError:
-            return [self.collection_name]
+        except OpenBaoError as e:
+            msg = f"Failed to list schemas: {e}"
+            raise StorageConnectionError(msg) from e
 
     async def list_models(
         self,
@@ -445,8 +434,9 @@ class OpenBaoDAO(BaseDAO):
                 else []
             )
             return [k.rstrip("/") for k in keys]
-        except OpenBaoError:
-            return []
+        except OpenBaoError as e:
+            msg = f"Failed to list models: {e}"
+            raise StorageConnectionError(msg) from e
 
     async def get_model_info(
         self,

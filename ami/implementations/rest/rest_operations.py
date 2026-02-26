@@ -201,13 +201,12 @@ async def upsert(
         uid = getattr(instance, "uid", None) or getattr(instance, "id", None)
 
     if uid and await dao.exists(str(uid)):
-        data = (
-            instance.to_storage_dict()
-            if isinstance(instance, StorageModel)
-            else instance
-            if isinstance(instance, dict)
-            else instance.model_dump(mode="json")
-        )
+        if isinstance(instance, StorageModel):
+            data = await instance.to_storage_dict()
+        elif isinstance(instance, dict):
+            data = instance
+        else:
+            data = instance.model_dump(mode="json")
         await dao.update(str(uid), data)
         return str(uid), False
 

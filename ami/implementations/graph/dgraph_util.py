@@ -1,18 +1,87 @@
 """Utility functions for Dgraph operations."""
 
+import asyncio
 import json
 import logging
+import re
 import types
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Union, get_args
+from uuid import UUID
 
 import pydgraph
 from pydantic import SecretStr
 
-from ami.core.exceptions import StorageError
+from ami.core.exceptions import StorageError, StorageValidationError
 
 logger = logging.getLogger(__name__)
+
+_DGRAPH_QUERY_TIMEOUT = 30.0
+
+
+async def query_with_timeout(
+    txn: Any,
+    query: str,
+    *,
+    variables: dict[str, str] | None = None,
+    timeout: float = _DGRAPH_QUERY_TIMEOUT,
+) -> Any:
+    """Execute a Dgraph ``txn.query()`` with a timeout."""
+    if variables:
+        return await asyncio.wait_for(
+            asyncio.to_thread(txn.query, query, variables=variables),
+            timeout=timeout,
+        )
+    return await asyncio.wait_for(
+        asyncio.to_thread(txn.query, query),
+        timeout=timeout,
+    )
+
+
+async def mutate_with_timeout(
+    txn: Any,
+    mutation: Any,
+    *,
+    timeout: float = _DGRAPH_QUERY_TIMEOUT,
+) -> Any:
+    """Execute a Dgraph ``txn.mutate()`` with a timeout."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(txn.mutate, mutation),
+        timeout=timeout,
+    )
+
+
+async def commit_with_timeout(
+    txn: Any,
+    *,
+    timeout: float = _DGRAPH_QUERY_TIMEOUT,
+) -> None:
+    """Execute a Dgraph ``txn.commit()`` with a timeout."""
+    await asyncio.wait_for(
+        asyncio.to_thread(txn.commit),
+        timeout=timeout,
+    )
+
+
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
+
+
+def _validate_identifier(name: str) -> str:
+    """Validate a DQL identifier (field name, type name, edge name).
+
+    Raises StorageValidationError for invalid identifiers.
+    """
+    if not _IDENTIFIER_RE.match(name):
+        msg = f"Invalid DQL identifier: {name!r}"
+        raise StorageValidationError(msg)
+    return name
+
+
+def _escape_dql_value(value: str) -> str:
+    """Escape a string for safe inclusion in DQL string literals."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 _DGRAPH_TYPE_MAPPING = {
@@ -21,6 +90,10 @@ _DGRAPH_TYPE_MAPPING = {
     float: "float",
     bool: "bool",
     datetime: "datetime",
+    date: "datetime",
+    Decimal: "float",
+    UUID: "string",
+    bytes: "string",
     list: "[string]",
     dict: "string",
 }
@@ -271,9 +344,10 @@ def build_dql_query(
             if filter_result:
                 filters.append(filter_result)
         else:
-            # Simple equality
+            # Simple equality -- validate field name, escape value
+            _validate_identifier(key)
             field = f"{collection_name}.{key}"
-            filters.append(f'eq({field}, "{value}")')
+            filters.append(f'eq({field}, "{_escape_dql_value(str(value))}")')
 
     # Combine filters and build query
     filter_str = " AND ".join(filters) if filters else ""
@@ -293,21 +367,30 @@ def build_filter(query: dict[str, Any], collection_name: str) -> str:
     filters = []
 
     for key, value in query.items():
+        _validate_identifier(key)
         if isinstance(value, dict):
             # Handle operators like $in, $gt, etc.
             for op, op_value in value.items():
                 if op == "$in":
-                    in_values = ", ".join([f'"{v}"' for v in op_value])
+                    in_values = ", ".join(
+                        [f'"{_escape_dql_value(str(v))}"' for v in op_value]
+                    )
                     filters.append(f"eq({collection_name}.{key}, [{in_values}])")
                 elif op == "$gt":
                     filters.append(f"gt({collection_name}.{key}, {op_value})")
                 elif op == "$lt":
                     filters.append(f"lt({collection_name}.{key}, {op_value})")
                 elif op == "$regex":
-                    filters.append(f'regexp({collection_name}.{key}, "/{op_value}/")')
+                    filters.append(
+                        f"regexp({collection_name}.{key},"
+                        f' "/{_escape_dql_value(str(op_value))}/")'
+                    )
         else:
             # Simple equality
-            filters.append(f'eq({collection_name}.{key}, "{value}")')
+            _validate_identifier(key)
+            filters.append(
+                f'eq({collection_name}.{key}, "{_escape_dql_value(str(value))}")'
+            )
 
     return " AND ".join(filters)
 
@@ -361,10 +444,16 @@ def _collect_indexed_fields(
     return indexed_fields
 
 
+_DEFAULT_SKIP_FIELDS: frozenset[str] = frozenset(
+    {"id", "uid", "storage_configs", "path"},
+)
+
+
 def _build_field_schema(
     collection_name: str,
     model_cls: Any,
     indexed_fields: dict[str, str],
+    skip_fields: frozenset[str] = _DEFAULT_SKIP_FIELDS,
 ) -> tuple[list[str], str]:
     """Build schema parts and type definition for model fields."""
     schema_parts = [
@@ -376,7 +465,6 @@ def _build_field_schema(
         f"  {collection_name}.app_uid\n"
         f"  {collection_name}._model_class"
     )
-    skip_fields = {"id", "uid", "storage_configs", "path"}
 
     for field_name, field_info in model_cls.model_fields.items():
         if field_name in skip_fields:

@@ -9,7 +9,6 @@ storage_configs:
     port: ${DGRAPH_PORT:-9080}
     database: ${DGRAPH_DB:-default}
     options:
-      is_ground_truth: true  # This is always the security source of truth
       alpha_addresses:
         - ${DGRAPH_ALPHA:-127.0.0.1:9080}
       zero_addresses:
@@ -102,11 +101,6 @@ storage_configs:
       timeout: ${OPENBAO_TIMEOUT:-30}
       retries: ${OPENBAO_RETRIES:-3}
       auth_method: ${OPENBAO_AUTH_METHOD:-token}
-      role_id: ${OPENBAO_APPROLE_ID:-}
-      secret_id: ${OPENBAO_APPROLE_SECRET:-}
-      jwt: ${OPENBAO_JWT:-}
-      kubernetes_role: ${OPENBAO_K8S_ROLE:-}
-      service_account_token_path: ${OPENBAO_K8S_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}
 
   # Keycloak - Identity and access management
   keycloak:

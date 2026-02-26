@@ -13,7 +13,7 @@ from typing import Any
 import aiohttp
 
 from ami.core.dao import BaseDAO
-from ami.core.exceptions import StorageError
+from ami.core.exceptions import StorageConnectionError, StorageError
 from ami.implementations.timeseries.prometheus_connection import (
     build_base_url,
     close_session,
@@ -27,7 +27,6 @@ from ami.implementations.timeseries.prometheus_read import (
     instant_query,
 )
 from ami.implementations.timeseries.prometheus_write import (
-    delete_series,
     write_metrics,
     write_single_metric,
 )
@@ -104,7 +103,9 @@ class PrometheusDAO(BaseDAO):
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             await self.connect()
-        assert self.session is not None
+        if self.session is None:
+            msg = "Failed to establish Prometheus session"
+            raise StorageConnectionError(msg)
         return self.session
 
     # ------------------------------------------------------------------
@@ -203,7 +204,7 @@ class PrometheusDAO(BaseDAO):
         record = results[0]
         if issubclass(self.model_cls, PrometheusMetric):
             return self.model_cls(**record)
-        return self.model_cls.from_storage_dict(record)
+        return await self.model_cls.from_storage_dict(record)
 
     async def find_one(self, query: dict[str, Any]) -> Any | None:
         """Find a single metric matching *query*."""
@@ -218,6 +219,7 @@ class PrometheusDAO(BaseDAO):
     ) -> list[Any]:
         """Query metrics using dict-based filters."""
         await self._ensure_session()
+        query = dict(query)
         metric_name = query.pop("metric_name", self._metric_name)
         results = await find_metrics(
             self,
@@ -226,65 +228,33 @@ class PrometheusDAO(BaseDAO):
             limit=limit,
             skip=skip,
         )
-        output: list[Any] = [
-            self.model_cls(**record)
-            if issubclass(self.model_cls, PrometheusMetric)
-            else self.model_cls.from_storage_dict(record)
-            for record in results
-        ]
+        output: list[Any] = []
+        for record in results:
+            if issubclass(self.model_cls, PrometheusMetric):
+                output.append(self.model_cls(**record))
+            else:
+                output.append(await self.model_cls.from_storage_dict(record))
         return output
 
     async def update(self, item_id: str, data: dict[str, Any]) -> None:
-        """'Update' a metric by writing a new sample.
-
-        Prometheus is append-only; updates are new data points.
-        """
-        await self._ensure_session()
-        metric_name = data.get("metric_name", self._metric_name)
-        labels = data.get("labels", {})
-        value = data.get("value", 0)
-        timestamp = data.get("timestamp")
-        await write_single_metric(
-            self,
-            metric_name,
-            float(value),
-            labels=labels,
-            timestamp=timestamp,
-        )
+        """Not supported -- Prometheus is append-only."""
+        msg = "Prometheus is append-only; update is not supported"
+        raise NotImplementedError(msg)
 
     async def bulk_update(self, updates: list[dict[str, Any]]) -> None:
-        """Bulk 'update' -- writes new samples for each entry."""
-        metrics: list[dict[str, Any]] = [
-            {
-                "metric_name": upd.get("metric_name", self._metric_name),
-                "labels": upd.get("labels", {}),
-                "value": upd.get("value", 0),
-                "timestamp": upd.get("timestamp"),
-            }
-            for upd in updates
-        ]
-        await self._ensure_session()
-        await write_metrics(self, metrics)
+        """Not supported -- Prometheus is append-only."""
+        msg = "Prometheus is append-only; bulk_update is not supported"
+        raise NotImplementedError(msg)
 
     async def delete(self, item_id: str) -> bool:
-        """Delete series matching the given selector."""
-        await self._ensure_session()
-        try:
-            count = await delete_series(self, match=[item_id])
-        except StorageError:
-            logger.warning("Delete failed for selector %s", item_id)
-            return False
-        else:
-            return count > 0
+        """Not supported -- Prometheus is append-only."""
+        msg = "Prometheus is append-only; delete is not supported"
+        raise NotImplementedError(msg)
 
     async def bulk_delete(self, ids: list[str]) -> int:
-        """Delete series for multiple selectors."""
-        await self._ensure_session()
-        deleted = 0
-        for item_id in ids:
-            if await self.delete(item_id):
-                deleted += 1
-        return deleted
+        """Not supported -- Prometheus is append-only."""
+        msg = "Prometheus is append-only; bulk_delete is not supported"
+        raise NotImplementedError(msg)
 
     async def count(self, query: dict[str, Any]) -> int:
         """Count matching series."""
@@ -322,9 +292,7 @@ class PrometheusDAO(BaseDAO):
         params: dict[str, Any] | None = None,
     ) -> int:
         """Execute a raw write (exposition-format lines)."""
-        await self._ensure_session()
-        session = self.session
-        assert session is not None
+        session = await self._ensure_session()
 
         url = f"{self.base_url}/api/v1/import/prometheus"
         payload = query

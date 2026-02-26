@@ -117,7 +117,7 @@ class DgraphRelationalMixin:
         schema = GraphSchemaAnalyzer.analyze_model(dao.model_cls)
 
         # Prepare node data
-        instance_dict = instance.to_storage_dict()
+        instance_dict = await instance.to_storage_dict()
         node_data, edges_data = self._prepare_node_data(instance_dict, schema)
 
         # Add type

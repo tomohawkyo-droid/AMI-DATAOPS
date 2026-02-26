@@ -12,7 +12,7 @@ from typing import Any
 import asyncpg
 
 from ami.core.dao import BaseDAO
-from ami.core.exceptions import StorageConnectionError, StorageError
+from ami.core.exceptions import QueryError, StorageConnectionError, StorageError
 from ami.implementations.embedding_service import get_embedding_service
 from ami.implementations.vec import (
     pgvector_create,
@@ -78,7 +78,7 @@ class PgVectorDAO(BaseDAO):
                 max_size=10,
             )
             logger.info("Connected to pgvector at %s", self._safe_dsn())
-        except Exception as exc:
+        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as exc:
             msg = f"Failed to connect to pgvector: {exc}"
             raise StorageConnectionError(msg) from exc
 
@@ -94,17 +94,18 @@ class PgVectorDAO(BaseDAO):
         """Return *True* if a simple query succeeds."""
         try:
             await self._ensure_pool()
-            assert self.pool is not None
+            if self.pool is None:
+                return False
             async with self.pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
-        except Exception:
+        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError):
             logger.warning("pgvector connection test failed")
             return False
         else:
             return True
 
     # ------------------------------------------------------------------
-    # CRUD — delegated to sub-modules
+    # CRUD -- delegated to sub-modules
     # ------------------------------------------------------------------
 
     async def create(self, instance: Any) -> str:
@@ -156,7 +157,7 @@ class PgVectorDAO(BaseDAO):
         await self._ensure_pool()
         await pgvector_update.bulk_update(self, updates)
 
-    async def bulk_delete(self, ids: list[str]) -> dict[str, Any] | int:
+    async def bulk_delete(self, ids: list[str]) -> int:
         await self._ensure_pool()
         return await pgvector_delete.bulk_delete(self, ids)
 
@@ -169,7 +170,9 @@ class PgVectorDAO(BaseDAO):
         await self._ensure_pool()
         table = get_safe_table_name(self.collection_name)
 
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
         async with self.pool.acquire() as conn:
             # Model-level indexes from metadata
             await create_model_indexes(conn, table, self.model_cls)
@@ -334,12 +337,11 @@ class PgVectorDAO(BaseDAO):
             return None
         try:
             return await self._embedding_service.generate_embedding(text)
-        except Exception:
-            logger.warning(
-                "Embedding generation failed for record in %s",
-                self.collection_name,
+        except Exception as e:
+            msg = (
+                f"Embedding generation failed for record in {self.collection_name}: {e}"
             )
-            return None
+            raise QueryError(msg) from e
 
     def _extract_text_for_embedding(self, data: dict[str, Any]) -> str:
         """Extract text from *data* using the default embedding fields.
@@ -367,7 +369,9 @@ class PgVectorDAO(BaseDAO):
         table = get_safe_table_name(self.collection_name)
         sql = f"SELECT embedding FROM {table} WHERE uid = $1"
 
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(sql, item_id)
 

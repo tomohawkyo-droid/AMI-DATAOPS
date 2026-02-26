@@ -20,6 +20,8 @@ dependencies = [
     "cryptography>=44.0.0",
     "uuid-utils==0.14.0",
     "setuptools==80.10.2",
+    "hvac>=2.1.0",
+    "bcrypt>=4.0.0",
 ]
 
 [dependency-groups]
@@ -67,7 +69,7 @@ module = ["optimum", "optimum.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["openbao", "openbao.*"]
+module = ["hvac", "hvac.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

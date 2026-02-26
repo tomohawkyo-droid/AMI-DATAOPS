@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from ami.core.exceptions import StorageError
+from ami.core.exceptions import StorageError, StorageValidationError
 from ami.implementations.sql.postgresql_create import (
     convert_datetime_strings_for_timestamps,
     ensure_table_exists,
@@ -12,10 +12,34 @@ from ami.implementations.sql.postgresql_create import (
 from ami.implementations.sql.postgresql_util import (
     get_safe_table_name,
     is_valid_identifier,
+    parse_affected_count,
     serialize_value,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_set_clause(
+    data: dict[str, Any],
+) -> tuple[list[str], list[Any]]:
+    """Build SET clause parts and values from *data*."""
+    set_clauses: list[str] = []
+    values: list[Any] = []
+    param_count = 1
+    skipped: list[str] = []
+
+    for key, value in data.items():
+        if key != "id" and is_valid_identifier(key):
+            set_clauses.append(f"{key} = ${param_count + 1}")
+            values.append(serialize_value(value))
+            param_count += 1
+        elif key != "id":
+            skipped.append(key)
+
+    if skipped:
+        logger.warning("Skipped invalid field names: %s", skipped)
+
+    return set_clauses, values
 
 
 async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
@@ -30,15 +54,11 @@ async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
     data["updated_at"] = datetime.now(UTC)
 
     async with dao.pool.acquire() as conn:
-        set_clauses = []
-        values = []
-        param_count = 1
+        set_clauses, values = _build_set_clause(data)
 
-        for key, value in data.items():
-            if key != "id" and is_valid_identifier(key):
-                set_clauses.append(f"{key} = ${param_count + 1}")
-                values.append(serialize_value(value))
-                param_count += 1
+        if not set_clauses:
+            msg = "No valid fields to update"
+            raise StorageValidationError(msg)
 
         values.insert(0, item_id)
 
@@ -57,7 +77,6 @@ async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
             msg = f"Failed to update record: {e}"
             raise StorageError(msg) from e
         else:
-            updated = result.split()[-1] == "1" if result else False
-            if not updated:
+            if parse_affected_count(result) == 0:
                 msg = f"Record not found: {item_id}"
                 raise StorageError(msg)

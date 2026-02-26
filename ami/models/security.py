@@ -149,4 +149,5 @@ class AuthRule(BaseModel):
             return str(self.rule_config.get("query", ""))
         if self.rule_type == "graph_traversal":
             return str(self.rule_config.get("traversal", ""))
-        return ""
+        msg = f"Unknown auth rule type: {self.rule_type!r}"
+        raise ValueError(msg)

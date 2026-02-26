@@ -1,15 +1,16 @@
 """Field-level encryption for PII and sensitive data."""
 
 import base64
-import hashlib
 import logging
+import os
 from typing import Any, ClassVar
 
+import bcrypt
 from cryptography.fernet import Fernet
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from ami.core.exceptions import ConfigurationError, DecryptionError
 from ami.models.security import (
     DataClassification,
     Permission,
@@ -18,63 +19,51 @@ from ami.models.security import (
 
 logger = logging.getLogger(__name__)
 
+# Fixed application salt for PBKDF2 key derivation (not a secret)
+_APP_KDF_SALT = b"ami-dataops-field-encryption-v1"
+_KDF_ITERATIONS = 600_000
+
 
 class KeyManager:
-    """Manage encryption keys."""
+    """Manage encryption keys via a single Fernet derived from the master key."""
 
-    _keys: ClassVar[dict[str, bytes]] = {}
-    _master_key: bytes | None = None
+    _fernet: ClassVar[Fernet | None] = None
 
     @classmethod
     def initialize(cls, master_key: str | None = None) -> None:
-        """Initialize key manager with master key."""
-        if master_key:
-            cls._master_key = master_key.encode()
-        else:
-            cls._master_key = Fernet.generate_key()
-            logger.warning(
-                "Using generated master key - not for production!",
+        """Derive a Fernet key from the master key."""
+        raw = master_key or os.getenv("DATAOPS_MASTER_KEY")
+        if not raw:
+            msg = (
+                "Master encryption key required. "
+                "Set DATAOPS_MASTER_KEY or pass master_key."
             )
+            raise ConfigurationError(msg)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=_APP_KDF_SALT,
+            iterations=_KDF_ITERATIONS,
+        )
+        derived = kdf.derive(raw.encode())
+        cls._fernet = Fernet(base64.urlsafe_b64encode(derived))
 
     @classmethod
-    def get_field_key(cls, field_name: str) -> bytes:
-        """Get or derive key for field."""
-        if field_name not in cls._keys:
-            if not cls._master_key:
-                cls.initialize()
-
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=field_name.encode(),
-                iterations=100000,
-                backend=default_backend(),
-            )
-
-            if cls._master_key is None:
-                msg = "Master key not initialized"
-                raise ValueError(msg)
-            derived = kdf.derive(cls._master_key)
-            cls._keys[field_name] = base64.urlsafe_b64encode(derived)
-
-        return cls._keys[field_name]
-
-    @classmethod
-    def rotate_keys(cls) -> None:
-        """Rotate encryption keys."""
-        cls._master_key = Fernet.generate_key()
-        cls._keys.clear()
-        logger.info("Encryption keys rotated")
+    def get_fernet(cls) -> Fernet:
+        """Return the initialized Fernet instance."""
+        if cls._fernet is None:
+            cls.initialize()
+        if cls._fernet is None:
+            msg = "Encryption not initialized"
+            raise ConfigurationError(msg)
+        return cls._fernet
 
 
 class TokenEncryption:
     """Token-based encryption for fields."""
 
-    def __init__(self, key: bytes | None = None) -> None:
-        if key:
-            self.cipher = Fernet(key)
-        else:
-            self.cipher = Fernet(Fernet.generate_key())
+    def __init__(self, fernet: Fernet | None = None) -> None:
+        self.cipher = fernet or KeyManager.get_fernet()
 
     def encrypt(self, value: str) -> str:
         """Encrypt value and return base64-encoded token."""
@@ -91,9 +80,9 @@ class TokenEncryption:
             encrypted = base64.urlsafe_b64decode(token.encode())
             decrypted: bytes = self.cipher.decrypt(encrypted)
             return decrypted.decode()
-        except Exception:
-            logger.exception("Decryption failed")
-            return "[DECRYPTION_FAILED]"
+        except Exception as exc:
+            msg = "Decryption failed"
+            raise DecryptionError(msg) from exc
 
 
 class FieldEncryption:
@@ -107,9 +96,8 @@ class FieldEncryption:
     ) -> str:
         """Encrypt field based on classification."""
         if classification >= DataClassification.CONFIDENTIAL:
-            key = KeyManager.get_field_key(field_name)
-            encryptor = TokenEncryption(key)
-            return encryptor.encrypt(str(value))
+            fernet = KeyManager.get_fernet()
+            return fernet.encrypt(str(value).encode()).decode()
         return str(value)
 
     @staticmethod
@@ -124,26 +112,25 @@ class FieldEncryption:
             or Permission.DECRYPT not in context.permissions
         ):
             return "[ENCRYPTED]"
-        key = KeyManager.get_field_key(field_name)
-        decryptor = TokenEncryption(key)
-        return decryptor.decrypt(encrypted)
+        fernet = KeyManager.get_fernet()
+        try:
+            return fernet.decrypt(encrypted.encode()).decode()
+        except Exception as exc:
+            msg = f"Decryption failed for field {field_name}"
+            raise DecryptionError(msg) from exc
 
     @staticmethod
-    def hash_field(value: str, salt: str | None = None) -> str:
-        """One-way hash for fields like passwords."""
-        if salt:
-            value = f"{salt}{value}"
-        hash_obj = hashlib.sha256(value.encode())
-        return hash_obj.hexdigest()
+    def hash_field(value: str) -> str:
+        """One-way hash using bcrypt."""
+        return bcrypt.hashpw(value.encode(), bcrypt.gensalt()).decode()
 
     @staticmethod
-    def verify_hash(
-        value: str,
-        hashed: str,
-        salt: str | None = None,
-    ) -> bool:
-        """Verify hashed value."""
-        return FieldEncryption.hash_field(value, salt) == hashed
+    def verify_hash(value: str, hashed: str) -> bool:
+        """Verify value against bcrypt hash."""
+        try:
+            return bcrypt.checkpw(value.encode(), hashed.encode())
+        except ValueError:
+            return False
 
 
 class PIIEncryption:
@@ -246,12 +233,12 @@ class TransparentEncryption:
 
     def encrypt_model(self, instance: Any) -> Any:
         """Encrypt fields in model instance."""
+        fernet = KeyManager.get_fernet()
+        encryptor = TokenEncryption(fernet)
         for field in self.encrypted_fields:
             if hasattr(instance, field):
                 value = getattr(instance, field)
                 if value and not value.startswith("[ENC:"):
-                    key = KeyManager.get_field_key(field)
-                    encryptor = TokenEncryption(key)
                     encrypted = encryptor.encrypt(str(value))
                     setattr(instance, field, f"[ENC:{encrypted}]")
         return instance
@@ -271,8 +258,8 @@ class TransparentEncryption:
                         hasattr(context, "permissions")
                         and Permission.DECRYPT in context.permissions
                     ):
-                        key = KeyManager.get_field_key(field)
-                        decryptor = TokenEncryption(key)
+                        fernet = KeyManager.get_fernet()
+                        decryptor = TokenEncryption(fernet)
                         decrypted = decryptor.decrypt(encrypted)
                         setattr(instance, field, decrypted)
                     elif PIIEncryption.is_pii_field(field):

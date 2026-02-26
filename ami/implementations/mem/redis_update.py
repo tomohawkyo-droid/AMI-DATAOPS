@@ -96,7 +96,7 @@ async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
         # Try to read existing data for merge, but don't fail if missing
         try:
             existing_data = await read(dao, item_id)
-        except Exception:
+        except KeyError:
             # Cache miss - this is normal in cache-aside pattern
             existing_data = None
 

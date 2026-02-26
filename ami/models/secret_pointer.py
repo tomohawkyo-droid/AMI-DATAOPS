@@ -8,7 +8,6 @@ from typing import ClassVar
 from pydantic import Field
 
 from ami.models.base_model import ModelMetadata, StorageModel
-from ami.models.storage_config_factory import StorageConfigFactory
 
 
 class SecretPointerRecord(StorageModel):
@@ -35,9 +34,6 @@ class SecretPointerRecord(StorageModel):
 
     _model_meta: ClassVar[ModelMetadata] = ModelMetadata(
         path="secret_pointer_records",
-        storage_configs={
-            "postgres": StorageConfigFactory.from_yaml("postgres"),
-        },
         indexes=[
             {"field": "vault_reference", "type": "hash", "unique": True},
             {"field": "namespace", "type": "hash"},

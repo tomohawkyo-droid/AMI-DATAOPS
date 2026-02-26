@@ -34,3 +34,7 @@ class TransactionError(StorageError):
 
 class ConfigurationError(StorageError):
     """Raised when storage configuration is invalid."""
+
+
+class DecryptionError(StorageError):
+    """Raised when field decryption fails."""

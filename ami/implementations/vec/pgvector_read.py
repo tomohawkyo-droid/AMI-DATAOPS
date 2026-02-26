@@ -11,6 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ami.core.exceptions import QueryError, StorageConnectionError
 from ami.implementations.vec.pgvector_util import (
     build_where_clause,
     deserialize_row,
@@ -34,13 +35,15 @@ async def find_by_id(dao: PgVectorDAO, item_id: str) -> Any | None:
     table = get_safe_table_name(dao.collection_name)
     sql = f"SELECT * FROM {table} WHERE uid = $1"
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         row = await conn.fetchrow(sql, item_id)
 
     if row is None:
         return None
-    return _row_to_model(dao, dict(row))
+    return await _row_to_model(dao, dict(row))
 
 
 async def find_one(
@@ -57,13 +60,15 @@ async def find_one(
         where, params = build_where_clause(query)
         sql = f"SELECT * FROM {table} WHERE {where} LIMIT 1"
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         row = await conn.fetchrow(sql, *params)
 
     if row is None:
         return None
-    return _row_to_model(dao, dict(row))
+    return await _row_to_model(dao, dict(row))
 
 
 # ------------------------------------------------------------------
@@ -94,11 +99,13 @@ async def find(
     if skip:
         sql += f" OFFSET {skip}"
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
-    return [_row_to_model(dao, dict(r)) for r in rows]
+    return [await _row_to_model(dao, dict(r)) for r in rows]
 
 
 # ------------------------------------------------------------------
@@ -120,7 +127,9 @@ async def count(
         sql = f"SELECT COUNT(*) FROM {table}"
         params = []
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         result = await conn.fetchval(sql, *params)
     return int(result) if result else 0
@@ -131,7 +140,9 @@ async def exists(dao: PgVectorDAO, item_id: str) -> bool:
     table = get_safe_table_name(dao.collection_name)
     sql = f"SELECT 1 FROM {table} WHERE uid = $1 LIMIT 1"
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         row = await conn.fetchval(sql, item_id)
     return row is not None
@@ -148,7 +159,9 @@ async def raw_read_query(
     params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute an arbitrary read query and return rows as dicts."""
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         if params:
             rows = await conn.fetch(query, *params.values())
@@ -165,7 +178,9 @@ async def raw_read_query(
 async def list_databases(dao: PgVectorDAO) -> list[str]:
     """List all databases visible to the connection."""
     sql = "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname"
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql)
     return [r["datname"] for r in rows]
@@ -181,7 +196,9 @@ async def list_schemas(
         "WHERE schema_name NOT IN ('pg_catalog', 'information_schema') "
         "ORDER BY schema_name"
     )
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql)
     return [r["schema_name"] for r in rows]
@@ -198,7 +215,9 @@ async def list_models(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema = $1 ORDER BY table_name"
     )
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql, target_schema)
     return [r["table_name"] for r in rows]
@@ -220,7 +239,9 @@ async def get_model_info(
         "FROM information_schema.tables "
         "WHERE table_schema = $1 AND table_name = $2"
     )
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         row = await conn.fetchrow(sql, target_schema, path)
 
@@ -261,7 +282,9 @@ async def get_model_fields(
         "WHERE table_schema = $1 AND table_name = $2 "
         "ORDER BY ordinal_position"
     )
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql, target_schema, path)
 
@@ -293,7 +316,9 @@ async def get_model_indexes(
         "WHERE schemaname = $1 AND tablename = $2 "
         "ORDER BY indexname"
     )
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql, target_schema, path)
 
@@ -305,7 +330,7 @@ async def get_model_indexes(
 # ------------------------------------------------------------------
 
 
-def _row_to_model(dao: PgVectorDAO, row: dict[str, Any]) -> Any:
+async def _row_to_model(dao: PgVectorDAO, row: dict[str, Any]) -> Any:
     """Convert a database row dict into a model instance."""
     data = deserialize_row(row)
 
@@ -319,7 +344,7 @@ def _row_to_model(dao: PgVectorDAO, row: dict[str, Any]) -> Any:
                 data[key] = json.loads(value)
 
     try:
-        return dao.model_cls.from_storage_dict(data)
-    except Exception:
-        logger.debug("Falling back to raw dict for table %s", dao.collection_name)
-        return data
+        return await dao.model_cls.from_storage_dict(data)
+    except Exception as e:
+        msg = f"Failed to hydrate row into {dao.model_cls.__name__}: {e}"
+        raise QueryError(msg) from e

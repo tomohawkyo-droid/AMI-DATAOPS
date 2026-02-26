@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ami.core.exceptions import StorageConnectionError
 from ami.implementations.vec.pgvector_util import (
     get_safe_table_name,
     is_valid_identifier,
@@ -40,13 +41,20 @@ async def update(
     set_parts: list[str] = []
     values: list[Any] = []
     param_idx = 1
+    skipped: list[str] = []
 
     for key, value in data.items():
-        if key == "uid" or not is_valid_identifier(key):
+        if key == "uid":
+            continue
+        if not is_valid_identifier(key):
+            skipped.append(key)
             continue
         set_parts.append(f"{key} = ${param_idx}")
         values.append(serialize_value(value))
         param_idx += 1
+
+    if skipped:
+        logger.warning("Skipped invalid field names: %s", skipped)
 
     if not set_parts:
         return
@@ -55,7 +63,9 @@ async def update(
     set_clause = ", ".join(set_parts)
     sql = f"UPDATE {table} SET {set_clause} WHERE uid = ${param_idx}"
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         await conn.execute(sql, *values)
 
@@ -85,14 +95,16 @@ async def raw_write_query(
     params: dict[str, Any] | None = None,
 ) -> int:
     """Execute an arbitrary write query and return affected-row count."""
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         if params:
             result = await conn.execute(query, *params.values())
         else:
             result = await conn.execute(query)
 
-    # asyncpg returns e.g. "UPDATE 3" — extract the count
+    # asyncpg returns e.g. "UPDATE 3" -- extract the count
     try:
         return int(result.split()[-1])
     except (ValueError, IndexError, AttributeError):

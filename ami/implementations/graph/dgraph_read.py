@@ -6,9 +6,12 @@ from typing import Any
 
 from ami.core.exceptions import StorageError
 from ami.implementations.graph.dgraph_util import (
+    _escape_dql_value,
+    _validate_identifier,
     build_count_query,
     build_dql_query,
     from_dgraph_format,
+    query_with_timeout,
 )
 from ami.models.base_model import StorageModel
 
@@ -21,24 +24,27 @@ async def find_by_id(dao: Any, item_id: str) -> StorageModel | None:
         msg = "Not connected to Dgraph"
         raise StorageError(msg)
 
+    coll = _validate_identifier(dao.collection_name)
+    variables: dict[str, str] | None = None
+
     # Check if it's a Dgraph UID or regular ID
     if item_id.startswith("0x"):
         # Build query for UID - don't use @filter with uid()
-        query = f"""
-        {{
-            node(func: uid({item_id})) {{
-                uid
-                expand(_all_)
-                dgraph.type
-            }}
-        }}
-        """
-    else:
-        # Build query for application UID field first (most likely case)
-        coll = dao.collection_name
+        escaped_uid = _escape_dql_value(item_id)
         query = (
             "{\n"
-            f'    node(func: eq({coll}.app_uid, "{item_id}"))'
+            f"    node(func: uid({escaped_uid})) {{\n"
+            "        uid\n"
+            "        expand(_all_)\n"
+            "        dgraph.type\n"
+            "    }\n"
+            "}"
+        )
+    else:
+        # Build query for application UID field with parameterization
+        query = (
+            "query find($id: string) {\n"
+            f"    node(func: eq({coll}.app_uid, $id))"
             f" @filter(type({coll})) {{\n"
             "        uid\n"
             "        expand(_all_)\n"
@@ -46,10 +52,11 @@ async def find_by_id(dao: Any, item_id: str) -> StorageModel | None:
             "    }\n"
             "}"
         )
+        variables = {"$id": item_id}
 
     txn = dao.client.txn(read_only=True)
     try:
-        response = txn.query(query)
+        response = await query_with_timeout(txn, query, variables=variables)
         data = json.loads(response.json)
         logger.debug("Query response: %s", data)
 
@@ -91,7 +98,7 @@ async def find_one(dao: Any, query: dict[str, Any]) -> StorageModel | None:
 
     txn = dao.client.txn(read_only=True)
     try:
-        response = txn.query(dql)
+        response = await query_with_timeout(txn, dql)
         data = json.loads(response.json)
 
         result_key = f"{dao.collection_name}_results"
@@ -124,7 +131,7 @@ async def find(
 
     txn = dao.client.txn(read_only=True)
     try:
-        response = txn.query(dql)
+        response = await query_with_timeout(txn, dql)
         data = json.loads(response.json)
 
         # Debug the response
@@ -160,7 +167,7 @@ async def count(dao: Any, query: dict[str, Any]) -> int:
 
     txn = dao.client.txn(read_only=True)
     try:
-        response = txn.query(dql)
+        response = await query_with_timeout(txn, dql)
         data = json.loads(response.json)
 
         # Extract count
@@ -188,20 +195,21 @@ async def exists(dao: Any, item_id: str) -> bool:
             # It's a Dgraph UID
             node = await find_by_id(dao, item_id)
             return node is not None
-        # It's a regular ID, query by field
-        coll = dao.collection_name
+        # It's a regular ID, query by field with parameterization
+        coll = _validate_identifier(dao.collection_name)
         query = (
-            "{\n"
-            f'    node(func: eq({coll}.uid, "{item_id}"))'
+            "query exists($id: string) {\n"
+            f"    node(func: eq({coll}.uid, $id))"
             f" @filter(type({coll})) {{\n"
             "        uid\n"
             "    }\n"
             "}"
         )
+        variables = {"$id": item_id}
 
         txn = dao.client.txn(read_only=True)
         try:
-            response = txn.query(query)
+            response = await query_with_timeout(txn, query, variables=variables)
             result = json.loads(response.json)
             return result.get("node") and len(result["node"]) > 0
         finally:
@@ -222,7 +230,7 @@ async def raw_read_query(
     txn = dao.client.txn(read_only=True)
     try:
         # Add variables if provided
-        response = txn.query(query, variables=params) if params else txn.query(query)
+        response = await query_with_timeout(txn, query, variables=params)
 
         result = json.loads(response.json)
         return (

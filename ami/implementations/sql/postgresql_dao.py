@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from ami.core.dao import BaseDAO
-from ami.core.exceptions import StorageError
+from ami.core.exceptions import (
+    QueryError,
+    StorageConnectionError,
+    StorageError,
+    StorageValidationError,
+)
 from ami.implementations.sql import (
     postgresql_create,
     postgresql_delete,
@@ -65,9 +70,9 @@ class PostgreSQLDAO(BaseDAO):
                 "Connected to PostgreSQL for collection %s",
                 self.collection_name,
             )
-        except Exception as e:
+        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as e:
             msg = "Failed to connect to PostgreSQL"
-            raise StorageError(msg) from e
+            raise StorageConnectionError(msg) from e
 
     async def disconnect(self) -> None:
         """Close the connection pool."""
@@ -84,11 +89,12 @@ class PostgreSQLDAO(BaseDAO):
         try:
             if not self.pool:
                 await self.connect()
-            assert self.pool is not None
+            if self.pool is None:
+                return False
             async with self.pool.acquire() as conn:
                 result = await conn.fetchval("SELECT 1")
                 return bool(result == 1)
-        except Exception:
+        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError):
             logger.exception("PostgreSQL connection test failed")
             return False
 
@@ -99,7 +105,7 @@ class PostgreSQLDAO(BaseDAO):
     async def create(self, instance: Any) -> str:
         """Create a new record from a model instance."""
         if isinstance(instance, StorageModel):
-            data = instance.to_storage_dict()
+            data = await instance.to_storage_dict()
         elif isinstance(instance, dict):
             data = instance
         else:
@@ -113,14 +119,14 @@ class PostgreSQLDAO(BaseDAO):
         row = await postgresql_read.read(self, item_id)
         if row is None:
             return None
-        return self._row_to_model(row)
+        return await self._row_to_model(row)
 
     async def find_one(self, query: dict[str, Any]) -> Any | None:
         """Find a single record matching the query."""
         results = await postgresql_read.query(self, query)
         if not results:
             return None
-        return self._row_to_model(results[0])
+        return await self._row_to_model(results[0])
 
     async def find(
         self,
@@ -134,7 +140,7 @@ class PostgreSQLDAO(BaseDAO):
             results = results[skip:]
         if limit is not None:
             results = results[:limit]
-        return [self._row_to_model(row) for row in results]
+        return [await self._row_to_model(row) for row in results]
 
     async def update(self, item_id: str, data: dict[str, Any]) -> None:
         """Update a record by ID."""
@@ -178,7 +184,7 @@ class PostgreSQLDAO(BaseDAO):
             fields = {k: v for k, v in update_data.items() if k not in ("id", "uid")}
             await postgresql_update.update(self, str(item_id), fields)
 
-    async def bulk_delete(self, ids: list[str]) -> dict[str, Any] | int:
+    async def bulk_delete(self, ids: list[str]) -> int:
         """Bulk delete multiple records."""
         deleted = 0
         for item_id in ids:
@@ -202,13 +208,22 @@ class PostgreSQLDAO(BaseDAO):
         """Execute a raw read query."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
+
+        if isinstance(params, dict):
+            msg = (
+                "Dict params lose ordering guarantees"
+                " with asyncpg positional parameters."
+                " Use a list or tuple instead."
+            )
+            raise StorageValidationError(msg)
 
         async with self.pool.acquire() as conn:
             try:
                 if params:
-                    param_values = list(params.values())
-                    rows = await conn.fetch(query, *param_values)
+                    rows = await conn.fetch(query, *params)
                 else:
                     rows = await conn.fetch(query)
                 return [dict(row) for row in rows]
@@ -224,7 +239,9 @@ class PostgreSQLDAO(BaseDAO):
         """Execute a raw write query."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
 
         async with self.pool.acquire() as conn:
             try:
@@ -247,7 +264,9 @@ class PostgreSQLDAO(BaseDAO):
         """List all databases."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
 
         async with self.pool.acquire() as conn:
             try:
@@ -267,7 +286,9 @@ class PostgreSQLDAO(BaseDAO):
         """List all schemas."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
 
         async with self.pool.acquire() as conn:
             try:
@@ -290,7 +311,9 @@ class PostgreSQLDAO(BaseDAO):
         """List all tables in the given schema."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
 
         target_schema = schema or "public"
 
@@ -315,7 +338,9 @@ class PostgreSQLDAO(BaseDAO):
         """Get information about a table."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
 
         async with self.pool.acquire() as conn:
             try:
@@ -368,7 +393,9 @@ class PostgreSQLDAO(BaseDAO):
         """Get index information for a table."""
         if not self.pool:
             await self.connect()
-        assert self.pool is not None
+        if self.pool is None:
+            msg = "Connection pool not available"
+            raise StorageConnectionError(msg)
 
         async with self.pool.acquire() as conn:
             try:
@@ -407,13 +434,10 @@ class PostgreSQLDAO(BaseDAO):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _row_to_model(self, row: dict[str, Any]) -> Any:
+    async def _row_to_model(self, row: dict[str, Any]) -> Any:
         """Convert a database row dict to a model instance."""
         try:
-            return self.model_cls.from_storage_dict(row)
-        except Exception:
-            logger.debug(
-                "Could not hydrate row into %s, returning raw dict",
-                self.model_cls.__name__,
-            )
-            return row
+            return await self.model_cls.from_storage_dict(row)
+        except Exception as e:
+            msg = f"Failed to hydrate row into {self.model_cls.__name__}: {e}"
+            raise QueryError(msg) from e

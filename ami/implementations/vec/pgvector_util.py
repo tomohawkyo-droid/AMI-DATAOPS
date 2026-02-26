@@ -172,8 +172,9 @@ async def create_indexes_for_table(
                 f"CREATE INDEX IF NOT EXISTS idx_{table_name}_{col}_gin "
                 f"ON {table_name} USING gin ({col})",
             )
-        except Exception:
-            logger.warning("Failed to create GIN index on %s.%s", table_name, col)
+        except Exception as e:
+            msg = f"Failed to create GIN index on {table_name}.{col}: {e}"
+            raise StorageError(msg) from e
 
     ts_cols = [
         k for k, v in data.items() if isinstance(v, datetime) and is_valid_identifier(k)
@@ -184,8 +185,9 @@ async def create_indexes_for_table(
                 f"CREATE INDEX IF NOT EXISTS idx_{table_name}_{col}_btree "
                 f"ON {table_name} ({col})",
             )
-        except Exception:
-            logger.warning("Failed to create B-tree index on %s.%s", table_name, col)
+        except Exception as e:
+            msg = f"Failed to create B-tree index on {table_name}.{col}: {e}"
+            raise StorageError(msg) from e
 
 
 async def create_model_indexes(
@@ -218,5 +220,6 @@ async def create_model_indexes(
         )
         try:
             await conn.execute(sql)
-        except Exception:
-            logger.warning("Failed to create index %s on %s", name, table_name)
+        except Exception as e:
+            msg = f"Failed to create index {name} on {table_name}: {e}"
+            raise StorageError(msg) from e

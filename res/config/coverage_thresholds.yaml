@@ -5,5 +5,5 @@ unit:
 
 integration:
   path: tests/integration
-  min_coverage: 50
+  min_coverage: 80
   source_path: ami

@@ -78,6 +78,8 @@ async def request_with_retry(
     retry_delay = retry_cfg.initial_delay
     last_exception: Exception | None = None
 
+    kwargs.setdefault("timeout", aiohttp.ClientTimeout(total=30))
+
     for attempt in range(max_retries):
         try:
             response = await session.request(

@@ -15,6 +15,20 @@ from ami.core.exceptions import StorageError
 logger = logging.getLogger(__name__)
 
 
+def parse_affected_count(result: str | None) -> int:
+    """Parse the affected-row count from an asyncpg command status string.
+
+    asyncpg returns strings like ``'DELETE 3'``, ``'UPDATE 1'``,
+    ``'INSERT 0 1'``.  The count is always the last token.
+    """
+    if not result:
+        return 0
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 def is_valid_identifier(name: str) -> bool:
     """Validate that identifier is safe for SQL."""
     return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))
@@ -140,7 +154,8 @@ async def create_indexes_for_table(
                 f"ON {table_name} USING gin ({col})",
             )
         except Exception as e:
-            logger.warning("Failed to create GIN index for %s: %s", col, e)
+            msg = f"Failed to create GIN index for {col}: {e}"
+            raise StorageError(msg) from e
 
     timestamp_columns = [
         key
@@ -155,8 +170,5 @@ async def create_indexes_for_table(
                 f"ON {table_name} ({col})",
             )
         except Exception as e:
-            logger.warning(
-                "Failed to create B-tree index for %s: %s",
-                col,
-                e,
-            )
+            msg = f"Failed to create B-tree index for {col}: {e}"
+            raise StorageError(msg) from e

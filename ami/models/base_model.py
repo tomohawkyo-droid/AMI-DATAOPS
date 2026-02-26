@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_utils import uuid7
 
 from ami.models.secured_mixin import SecuredModelMixin
@@ -51,7 +51,7 @@ _EMPTY_META = ModelMetadata()
 class StorageModel(SecuredModelMixin, StorageConfigMixin, BaseModel):
     """Base model for all storage-aware models.
 
-    Pure data model — persistence logic lives in UnifiedCRUD.
+    Pure data model -- persistence logic lives in UnifiedCRUD.
     """
 
     model_config = ConfigDict(
@@ -84,35 +84,8 @@ class StorageModel(SecuredModelMixin, StorageConfigMixin, BaseModel):
     # Validators / hooks
     # ------------------------------------------------------------------
 
-    @model_validator(mode="before")
-    @classmethod
-    def _hydrate_sensitive_fields(cls, data: Any) -> Any:
-        """Hydrate sensitive fields from vault pointers."""
-        if not isinstance(data, dict):
-            return data
-        if not getattr(cls, "_sensitive_fields", None):
-            return data
-        try:
-            from ami.secrets.adapter import (
-                hydrate_sensitive_fields,
-            )
-
-            return hydrate_sensitive_fields(cls, data)
-        except ImportError:
-            return data
-
     def model_post_init(self, /, __context: Any) -> None:
         super().model_post_init(__context)
-        try:
-            from ami.secrets.adapter import (
-                consume_pointer_cache,
-            )
-
-            pointer_map = consume_pointer_cache()
-            if pointer_map:
-                self._vault_pointer_cache.update(pointer_map)
-        except ImportError:
-            pass
 
     # ------------------------------------------------------------------
     # Metadata access
@@ -169,7 +142,7 @@ class StorageModel(SecuredModelMixin, StorageConfigMixin, BaseModel):
     # Serialization
     # ------------------------------------------------------------------
 
-    def to_storage_dict(
+    async def to_storage_dict(
         self,
         context: SecurityContext | None = None,
     ) -> dict[str, Any]:
@@ -183,16 +156,36 @@ class StorageModel(SecuredModelMixin, StorageConfigMixin, BaseModel):
                 from ami.secrets.adapter import (
                     prepare_instance_for_storage,
                 )
+            except ImportError as exc:
+                msg = (
+                    f"Model {self.__class__.__name__} has sensitive fields "
+                    "but ami.secrets.adapter is not available"
+                )
+                raise ImportError(msg) from exc
 
-                return prepare_instance_for_storage(self, data, context)
-            except ImportError:
-                pass
+            return await prepare_instance_for_storage(self, data, context)
         return data
 
     @classmethod
-    def from_storage_dict(cls, data: dict[str, Any]) -> StorageModel:
+    async def from_storage_dict(cls, data: dict[str, Any]) -> StorageModel:
         """Create model instance from storage dictionary."""
         processed = data.copy()
+
+        if getattr(cls, "_sensitive_fields", None):
+            try:
+                from ami.secrets.adapter import (
+                    consume_pointer_cache,
+                    hydrate_sensitive_fields,
+                )
+            except ImportError as exc:
+                msg = (
+                    f"Model {cls.__name__} has sensitive fields "
+                    "but ami.secrets.adapter is not available"
+                )
+                raise ImportError(msg) from exc
+
+            processed = await hydrate_sensitive_fields(cls, processed)
+
         for field_name, field_info in cls.model_fields.items():
             if (
                 field_name in processed
@@ -209,7 +202,15 @@ class StorageModel(SecuredModelMixin, StorageConfigMixin, BaseModel):
                         processed[field_name],
                         field_name,
                     )
-        return cls(**processed)
+
+        instance = cls(**processed)
+
+        if getattr(cls, "_sensitive_fields", None):
+            pointer_map = consume_pointer_cache()
+            if pointer_map:
+                instance._vault_pointer_cache.update(pointer_map)
+
+        return instance
 
     # ------------------------------------------------------------------
     # Security-aware operations

@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote_plus
 
 from pydantic import Field
 
@@ -96,18 +97,20 @@ class StorageConfig(IPConfig):
             msg = "Storage type not set"
             raise ValueError(msg)
 
+        _user = quote_plus(self.username or "")
+        _pass = quote_plus(self.password or "")
+
         formatters: dict[StorageType, Callable[[], str]] = {
             StorageType.RELATIONAL: lambda: (
-                f"postgresql+asyncpg://{self.username}:{self.password}"
+                f"postgresql+asyncpg://{_user}:{_pass}"
                 f"@{self.host}:{self.port}/{self.database}"
             ),
             StorageType.VECTOR: lambda: (
-                f"postgresql+asyncpg://{self.username}:{self.password}"
+                f"postgresql+asyncpg://{_user}:{_pass}"
                 f"@{self.host}:{self.port}/{self.database}"
             ),
             StorageType.DOCUMENT: lambda: (
-                f"mongodb://{self.username}:{self.password}"
-                f"@{self.host}:{self.port}/{self.database}"
+                f"mongodb://{_user}:{_pass}" f"@{self.host}:{self.port}/{self.database}"
             ),
             StorageType.INMEM: lambda: (
                 f"redis://{self.host}:{self.port}/{self.database or 0}"

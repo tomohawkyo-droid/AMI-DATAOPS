@@ -1,4 +1,4 @@
-"""SecuredModelMixin — security mixin for StorageModel classes.
+"""SecuredModelMixin -- security mixin for StorageModel classes.
 
 FIX: DENY rules are now checked BEFORE ALLOW rules to prevent
 allow-bypasses-deny vulnerabilities.
@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import Field
+from typing_extensions import TypedDict
 
 from ami.models.security import (
     ACLEntry,
@@ -19,6 +20,15 @@ from ami.models.security import (
 )
 
 _MAX_ACCESS_ENTRIES = 100
+
+
+class AccessLogEntry(TypedDict):
+    """A single access-audit record."""
+
+    user_id: str
+    permission: str
+    result: str
+    timestamp: str
 
 
 class SecuredModelMixin:
@@ -37,8 +47,7 @@ class SecuredModelMixin:
     modified_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
     )
-    accessed_by: list[str] = Field(default_factory=list)
-    accessed_at: list[datetime] = Field(default_factory=list)
+    access_log: list[AccessLogEntry] = Field(default_factory=list)
 
     classification: DataClassification = DataClassification.INTERNAL
     encrypted_fields: list[str] = Field(default_factory=list)
@@ -124,15 +133,18 @@ class SecuredModelMixin:
     def _log_access(
         self,
         context: SecurityContext,
-        _permission: Permission,
-        _result: str,
+        permission: Permission,
+        result: str,
     ) -> None:
-        if context.user_id not in self.accessed_by:
-            self.accessed_by.append(context.user_id)
-        self.accessed_at.append(datetime.now(UTC))
-        if len(self.accessed_by) > _MAX_ACCESS_ENTRIES:
-            self.accessed_by = self.accessed_by[-_MAX_ACCESS_ENTRIES:]
-            self.accessed_at = self.accessed_at[-_MAX_ACCESS_ENTRIES:]
+        entry: AccessLogEntry = {
+            "user_id": context.user_id,
+            "permission": permission.value,
+            "result": result,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        self.access_log.append(entry)
+        if len(self.access_log) > _MAX_ACCESS_ENTRIES:
+            self.access_log = self.access_log[-_MAX_ACCESS_ENTRIES:]
 
     # ------------------------------------------------------------------
     # Permission management

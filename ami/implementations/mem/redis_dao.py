@@ -9,7 +9,11 @@ import redis.asyncio as redis
 from redis.asyncio import Redis
 
 from ami.core.dao import BaseDAO
-from ami.core.exceptions import StorageError, StorageValidationError
+from ami.core.exceptions import (
+    StorageConnectionError,
+    StorageError,
+    StorageValidationError,
+)
 from ami.implementations.mem import (
     redis_create,
     redis_delete,
@@ -72,10 +76,10 @@ class RedisDAO(BaseDAO):
                 self.config.host,
                 self.config.port,
             )
-        except Exception as e:
+        except redis.RedisError as e:
             logger.exception("Failed to connect to Redis")
             msg = f"Redis connection failed: {e}"
-            raise StorageError(msg) from e
+            raise StorageConnectionError(msg) from e
 
     async def disconnect(self) -> None:
         """Disconnect from Redis."""
@@ -84,7 +88,7 @@ class RedisDAO(BaseDAO):
                 await self.client.aclose()
                 self.client = None
                 logger.info("Disconnected from Redis")
-            except Exception as e:
+            except redis.RedisError as e:
                 logger.exception("Failed to disconnect from Redis")
                 msg = f"Redis disconnection failed: {e}"
                 raise StorageError(msg) from e
@@ -267,8 +271,8 @@ class RedisDAO(BaseDAO):
                     return [{"value": get_result}] if get_result else []
                 return []
             if command == "KEYS":
-                pattern = parts[1] if len(parts) > 1 else "*"
-                keys = await self.client.keys(pattern)
+                pattern = parts[1] if len(parts) > 1 else f"{self._key_prefix}*"
+                keys = [key async for key in self.client.scan_iter(match=pattern)]
                 return [{"key": key} for key in keys]
             # INFO
             info = await self.client.info()

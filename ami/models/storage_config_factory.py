@@ -36,6 +36,11 @@ _TYPE_MAPPING: dict[str, StorageType] = {
 _yaml_cache: dict[str, dict[str, Any] | None] = {"data": None}
 
 
+def invalidate_yaml_cache() -> None:
+    """Clear the cached YAML config so the next access re-reads from disk."""
+    _yaml_cache["data"] = None
+
+
 def _load_yaml() -> dict[str, Any]:
     """Load and cache the storage-config.yaml file."""
     cached = _yaml_cache["data"]

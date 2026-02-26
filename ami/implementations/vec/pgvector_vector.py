@@ -10,6 +10,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ami.core.exceptions import StorageConnectionError
 from ami.implementations.vec.pgvector_util import (
     build_where_clause,
     deserialize_row,
@@ -46,7 +47,7 @@ async def similarity_search(
     filters:
         Optional column filters to narrow the search.
     metric:
-        Distance metric — ``"cosine"`` (default), ``"l2"``, or ``"ip"``.
+        Distance metric -- ``"cosine"`` (default), ``"l2"``, or ``"ip"``.
     """
     embedding = await dao._get_query_embedding(query_text)
     return await similarity_search_by_vector(
@@ -91,7 +92,9 @@ async def similarity_search_by_vector(
         f"LIMIT {limit}"
     )
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
@@ -141,7 +144,9 @@ async def fetch_embedding(
     table = get_safe_table_name(dao.collection_name)
     sql = f"SELECT embedding FROM {table} WHERE uid = $1"
 
-    assert dao.pool is not None
+    if dao.pool is None:
+        msg = "Connection pool not available"
+        raise StorageConnectionError(msg)
     async with dao.pool.acquire() as conn:
         row = await conn.fetchrow(sql, item_id)
 
@@ -179,7 +184,7 @@ def _parse_embedding(raw: Any) -> list[float] | None:
     if raw is None:
         return None
 
-    # list or tuple — already usable
+    # list or tuple -- already usable
     if isinstance(raw, list | tuple):
         return [float(v) for v in raw]
 

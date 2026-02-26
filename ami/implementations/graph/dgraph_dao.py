@@ -198,19 +198,18 @@ class DgraphDAO(BaseDAO, DgraphRelationalMixin, DgraphTraversalMixin):
         """Delete record by ID."""
         return await dgraph_delete.delete(self, item_id)
 
-    async def bulk_delete(self, ids: list[str]) -> dict[str, Any]:
-        """Bulk delete multiple records."""
-        return await dgraph_delete.bulk_delete(self, ids)
+    async def bulk_delete(self, ids: list[str]) -> int:
+        """Bulk delete multiple records. Returns count of deleted records."""
+        result = await dgraph_delete.bulk_delete(self, ids)
+        return int(result["success_count"])
 
     # Graph-specific operations
-    async def k_hop_query(
+    async def one_hop_neighbors(
         self,
         start_id: str,
-        k: int,
-        edge_types: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Perform k-hop graph traversal from a starting node."""
-        return await dgraph_graph.k_hop_query(self, start_id, k, edge_types)
+        """Find immediate neighbors of a starting node (1-hop traversal)."""
+        return await dgraph_graph.one_hop_neighbors(self, start_id)
 
     async def shortest_path(
         self,

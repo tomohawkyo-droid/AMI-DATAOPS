@@ -8,6 +8,11 @@ from typing import Any
 import pydgraph
 
 from ami.core.exceptions import StorageError, StorageValidationError
+from ami.implementations.graph.dgraph_util import (
+    commit_with_timeout,
+    mutate_with_timeout,
+    query_with_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +108,7 @@ def _parse_uid_response(response_json: str, item_id: str) -> str:
     return uid_value
 
 
-def _get_actual_uid(dao: Any, item_id: str) -> str:
+async def _get_actual_uid(dao: Any, item_id: str) -> str:
     """Get actual Dgraph UID from item ID.
 
     Raises:
@@ -133,7 +138,9 @@ def _get_actual_uid(dao: Any, item_id: str) -> str:
     txn = dao.client.txn(read_only=True)
     try:
         try:
-            response = txn.query(query, variables={"$item_id": item_id})
+            response = await query_with_timeout(
+                txn, query, variables={"$item_id": item_id}
+            )
         except Exception as e:
             msg = f"Failed to execute Dgraph query: {e}"
             raise StorageError(msg) from e
@@ -216,18 +223,14 @@ def _format_value(key: str, value: Any) -> Any:
         except (ValueError, AttributeError) as e:
             msg = f"Failed to convert datetime to ISO format for {key}: {e}"
             raise StorageValidationError(msg) from e
-    if isinstance(value, str) and key in [
-        "created_at",
-        "updated_at",
-        "verified_at",
-        "last_login",
-    ]:
+    if isinstance(value, str) and (
+        key.endswith("_at") or key.endswith("_date") or key == "timestamp"
+    ):
         try:
             dt = datetime.fromisoformat(value.replace(" ", "T"))
             return dt.isoformat()
-        except (ValueError, AttributeError) as e:
-            msg = f"Invalid datetime format for {key}: {value}"
-            raise StorageValidationError(msg) from e
+        except (ValueError, AttributeError):
+            pass
 
     return value
 
@@ -243,7 +246,7 @@ async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
         msg = "Not connected to Dgraph"
         raise StorageError(msg)
 
-    actual_uid = _get_actual_uid(dao, item_id)
+    actual_uid = await _get_actual_uid(dao, item_id)
 
     txn = dao.client.txn()
     try:
@@ -255,7 +258,7 @@ async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
             raise StorageError(msg) from e
         try:
             del_mutation = pydgraph.Mutation(delete_json=delete_json)
-            txn.mutate(del_mutation)
+            await mutate_with_timeout(txn, del_mutation)
         except Exception as e:
             msg = f"Failed to execute delete mutation: {e}"
             raise StorageError(msg) from e
@@ -268,21 +271,19 @@ async def update(dao: Any, item_id: str, data: dict[str, Any]) -> None:
             raise StorageError(msg) from e
         try:
             mutation = pydgraph.Mutation(set_json=update_json)
-            txn.mutate(mutation)
+            await mutate_with_timeout(txn, mutation)
         except Exception as e:
             msg = f"Failed to execute set mutation: {e}"
             raise StorageError(msg) from e
         try:
-            txn.commit()
+            await commit_with_timeout(txn)
         except Exception as e:
             msg = f"Failed to commit transaction: {e}"
             raise StorageError(msg) from e
 
     except (StorageValidationError, StorageError):
-        txn.discard()
         raise
     except Exception as e:
-        txn.discard()
         msg = f"Failed to update in Dgraph: {e}"
         raise StorageError(msg) from e
     finally:
@@ -382,14 +383,19 @@ def _extract_mutation_count(response: Any) -> int:
 
 
 async def raw_write_query(
-    dao: Any, query: str, _params: dict[str, Any] | None = None
+    dao: Any, query: str, params: dict[str, Any] | None = None
 ) -> int:
     """Execute raw mutation. Returns count after successful commit.
 
     Raises:
         StorageError: If not connected, mutation/commit fails, or bad response
         StorageValidationError: If query encoding fails
+        NotImplementedError: If params are provided (not supported for DQL)
     """
+    if params is not None:
+        msg = "Parameterized DQL mutations are not supported by Dgraph"
+        raise NotImplementedError(msg)
+
     if not dao.client:
         msg = "Not connected to Dgraph"
         raise StorageError(msg)
@@ -401,22 +407,20 @@ async def raw_write_query(
     try:
         try:
             mutation = pydgraph.Mutation(set_nquads=query_bytes)
-            response = txn.mutate(mutation)
+            response = await mutate_with_timeout(txn, mutation)
         except Exception as e:
             msg = f"Failed to execute mutation: {e}"
             raise StorageError(msg) from e
         try:
-            txn.commit()
+            await commit_with_timeout(txn)
         except Exception as e:
             msg = f"Failed to commit transaction: {e}"
             raise StorageError(msg) from e
         return _extract_mutation_count(response)
 
     except (StorageError, StorageValidationError):
-        txn.discard()
         raise
     except Exception as e:
-        txn.discard()
         msg = f"Failed to execute mutation: {e}"
         raise StorageError(msg) from e
     finally:

@@ -192,7 +192,7 @@ class DgraphTraversalMixin:
 
             node_data = result["node"][0]
             # Convert to model instance
-            return self._dgraph_to_model(node_data, schema, dao)
+            return await self._dgraph_to_model(node_data, schema, dao)
 
         finally:
             txn.discard()
@@ -294,7 +294,7 @@ class DgraphTraversalMixin:
             msg = f"Item with ID {item_id} not found in Dgraph after loading relations"
             raise StorageError(msg)
 
-    def _dgraph_to_model(
+    async def _dgraph_to_model(
         self,
         dgraph_data: dict[str, Any],
         schema: dict[str, Any],
@@ -332,7 +332,7 @@ class DgraphTraversalMixin:
                     model_data[field_name] = edge_data[0]["uid"]
 
         # Create model instance
-        return dao.model_cls.from_storage_dict(model_data)
+        return await dao.model_cls.from_storage_dict(model_data)
 
     def _build_traverse_query(self, start_uid: str, edge_path: list[str]) -> str:
         """Build a nested query for graph traversal."""
@@ -406,14 +406,12 @@ class DgraphTraversalMixin:
         self,
         start_uid: str,
         edge_path: list[str],
-        _filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Traverse the graph following a path of edges.
 
         Args:
             start_uid: Starting node UID
             edge_path: List of edge names to follow
-            _filters: Optional filters to apply at each step
 
         Returns:
             List of nodes at the end of the path

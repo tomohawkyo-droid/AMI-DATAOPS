@@ -77,18 +77,14 @@ def _validate_positive_int(value: int) -> int:
     return value
 
 
-async def k_hop_query(
+async def one_hop_neighbors(
     dao: Any,
     start_id: str,
-    _k: int,
-    _edge_types: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Perform k-hop graph traversal from a starting node.
+    """Find immediate neighbors of a starting node (1-hop traversal).
 
     Args:
         start_id: UID of the starting node
-        _k: Number of hops to traverse (currently unused, defaults to 1-hop)
-        _edge_types: Optional list of edge types to follow (currently unused)
 
     Returns:
         Dict containing nodes and edges found in traversal
@@ -161,12 +157,12 @@ async def k_hop_query(
             txn.discard()
 
     except ValueError as e:
-        logger.exception("Invalid input for k-hop query")
+        logger.exception("Invalid input for one-hop neighbors query")
         msg = f"Invalid input: {e}"
         raise StorageError(msg) from e
     except Exception as e:
-        logger.exception("K-hop query failed")
-        msg = f"K-hop traversal failed: {e}"
+        logger.exception("One-hop neighbors query failed")
+        msg = f"One-hop neighbors query failed: {e}"
         raise StorageError(msg) from e
 
 
