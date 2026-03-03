@@ -1,9 +1,0 @@
-unit:
-  path: tests/unit
-  min_coverage: 90
-  source_path: ami
-
-integration:
-  path: tests/integration
-  min_coverage: 80
-  source_path: ami

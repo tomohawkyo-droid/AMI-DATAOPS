@@ -1,13 +1,18 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
-    hooks:
-      - id: ruff-format
-        args: [ --config, ../../res/config/ruff.toml ]
-      - id: ruff
-        args: [ --config, ../../res/config/ruff.toml, --fix, --exit-non-zero-on-fix ]
   - repo: local
     hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --config ../../res/config/ruff.toml .
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff
+        name: ruff lint
+        entry: uv run ruff check --config ../../res/config/ruff.toml --fix --exit-non-zero-on-fix .
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: mypy
         name: mypy
         entry: uv run mypy --config-file ../../res/config/mypy.toml ami

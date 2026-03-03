@@ -1,5 +1,5 @@
 # Makefile for AMI-DATAOPS
-# Uses uv workspace to get code quality tools from ami-agents
+# Data operations toolkit: backup, sync, provisioning, monitoring, maintenance.
 #
 # This project is a uv workspace member of AMI-AGENTS. It must be cloned
 # inside the AMI-AGENTS repo at projects/AMI-DATAOPS.
@@ -38,8 +38,6 @@ help: ## Show this help
 	@echo "  lint-fix             Run ruff with auto-fix"
 	@echo "  type-check           Run mypy"
 	@echo "  test                 Run pytest"
-	@echo "  test-unit            Run unit tests only"
-	@echo "  test-integration     Run integration tests only"
 	@echo "  test-cov             Run tests with coverage"
 	@echo "  check                Run all checks"
 	@echo "  pre-commit           Run pre-commit on all files"
@@ -115,6 +113,11 @@ preflight:
 		echo "AMI-AGENTS repo appears incomplete. Pull latest and retry."; \
 		exit 1; \
 	fi
+	@if [ ! -f "$(AGENTS_ROOT)/projects/AMI-CI/lib/checks.sh" ]; then \
+		echo "📦 AMI-CI not found — cloning to $(AGENTS_ROOT)/projects/AMI-CI..."; \
+		git clone git@github.com:Independent-AI-Labs/AMI-CI.git "$(AGENTS_ROOT)/projects/AMI-CI"; \
+		echo "✅ AMI-CI cloned"; \
+	fi
 	@if [ ! -x "$(UV)" ]; then \
 		echo ""; \
 		echo "ERROR: Workspace uv not found at $(UV)"; \
@@ -148,7 +151,7 @@ install-ci: ## CI install: Python only, no hooks
 
 .PHONY: install-package
 install-package: preflight ## Install Python dependencies
-	$(UV) sync --group dev
+	$(UV) sync --extra dev
 
 .PHONY: install-hooks
 install-hooks: preflight ## Install pre-commit hooks (requires install-package to have been run)
@@ -176,14 +179,6 @@ type-check: preflight ## Run mypy
 .PHONY: test
 test: preflight ## Run pytest
 	$(UV) run pytest
-
-.PHONY: test-unit
-test-unit: preflight ## Run unit tests only
-	$(UV) run pytest tests/unit -v
-
-.PHONY: test-integration
-test-integration: preflight ## Run integration tests only
-	$(UV) run pytest tests/integration -v
 
 .PHONY: test-cov
 test-cov: preflight ## Run tests with coverage
