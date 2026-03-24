@@ -1,0 +1,202 @@
+---
+# AMI-DATAOPS - Volume Backup & Restore Playbook
+#
+# Uses native `podman volume export/import` (Podman 4.1+).
+#
+# Tags:
+#   backup  - Export volumes to timestamped .tar.gz files
+#   restore - Import a volume from a backup file
+#
+# Variables (override with -e):
+#   backup_dir     - Where to store backups (default: ~/backups/volumes)
+#   volumes        - List of volume names to back up (default: ami-trading_*)
+#   volume         - Single volume name for restore
+#   backup_file    - Path to .tar.gz file for restore
+#   stop_containers - Stop containers using volumes before export (default: true)
+#
+# Examples:
+#   make volume-backup
+#   make volume-restore volume=ami-trading_timescale_data backup_file=~/backups/volumes/ami-trading_timescale_data_20260323_120000.tar.gz
+#
+- name: Volume Backup & Restore
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    backup_dir: "{{ ansible_env.HOME }}/backups/volumes"
+    stop_containers: true
+    volumes:
+      - ami-trading_timescale_data
+      - ami-trading_minio_data
+      - ami-trading_prefect_data
+    # Map volumes to their container names for quiescing
+    volume_containers:
+      ami-trading_timescale_data: timescaledb-forecasting
+      ami-trading_minio_data: minio-s3
+      ami-trading_prefect_data: prefect-server
+      docker_timescale_data: timescaledb-forecasting
+      docker_minio_data: minio-s3
+      docker_prefect_data: prefect-server
+
+  tasks:
+    # =========================================================================
+    # BACKUP
+    # =========================================================================
+    - name: Backup volumes
+      tags: [backup, never]
+      block:
+        - name: Create backup directory
+          ansible.builtin.file:
+            path: "{{ backup_dir }}"
+            state: directory
+            mode: "0700"
+
+        - name: Set backup timestamp
+          ansible.builtin.command:
+            cmd: date +%Y%m%d_%H%M%S
+          register: ts_result
+          changed_when: false
+
+        - name: Set timestamp fact
+          ansible.builtin.set_fact:
+            timestamp: "{{ ts_result.stdout }}"
+
+        - name: Check volumes exist
+          ansible.builtin.command:
+            cmd: podman volume inspect {{ item }}
+          loop: "{{ volumes }}"
+          register: vol_check
+          failed_when: vol_check.rc != 0
+          changed_when: false
+
+        - name: Stop containers for crash-consistent backup
+          ansible.builtin.shell: |
+            container="{{ volume_containers[item] | default('') }}"
+            if [ -n "$container" ]; then
+              state=$(podman inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' "$container" 2>/dev/null || echo "missing")
+              if [ "$state" = "running" ]; then
+                podman stop "$container"
+                echo "stopped"
+              else
+                echo "not_running"
+              fi
+            else
+              echo "no_container"
+            fi
+          args:
+            executable: /bin/bash
+          loop: "{{ volumes }}"
+          register: stopped_containers
+          when: stop_containers | bool
+
+        - name: Export volumes to compressed archives
+          ansible.builtin.shell: |
+            podman volume export {{ item }} | gzip > "{{ backup_dir }}/{{ item }}_{{ timestamp }}.tar.gz"
+          args:
+            executable: /bin/bash
+          loop: "{{ volumes }}"
+
+        - name: Verify backup integrity
+          ansible.builtin.command:
+            cmd: gzip -t "{{ backup_dir }}/{{ item }}_{{ timestamp }}.tar.gz"
+          loop: "{{ volumes }}"
+          changed_when: false
+
+        - name: Restart stopped containers
+          ansible.builtin.shell: |
+            container="{{ volume_containers[item.item] | default('') }}"
+            if [ "{{ item.stdout | default('') }}" = "stopped" ]; then
+              podman start "$container"
+            fi
+          args:
+            executable: /bin/bash
+          loop: "{{ stopped_containers.results | default([]) }}"
+          when:
+            - stop_containers | bool
+            - item.stdout | default('') == "stopped"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Report backup files
+          ansible.builtin.shell: |
+            for vol in {{ volumes | join(' ') }}; do
+              f="{{ backup_dir }}/${vol}_{{ timestamp }}.tar.gz"
+              size=$(du -sh "$f" | cut -f1)
+              echo "  $f ($size)"
+            done
+          register: backup_report
+          changed_when: false
+
+        - name: Backup complete
+          ansible.builtin.debug:
+            msg: |
+              Backups created:
+              {{ backup_report.stdout }}
+
+    # =========================================================================
+    # RESTORE
+    # =========================================================================
+    - name: Restore volume from backup
+      tags: [restore, never]
+      block:
+        - name: Validate restore parameters
+          ansible.builtin.assert:
+            that:
+              - volume is defined and volume | length > 0
+              - backup_file is defined and backup_file | length > 0
+            fail_msg: "Must provide -e volume=NAME -e backup_file=PATH"
+
+        - name: Check backup file exists
+          ansible.builtin.stat:
+            path: "{{ backup_file }}"
+          register: bf_stat
+          failed_when: not bf_stat.stat.exists
+
+        - name: Verify backup file integrity
+          ansible.builtin.command:
+            cmd: gzip -t "{{ backup_file }}"
+          changed_when: false
+
+        - name: Stop container using this volume
+          ansible.builtin.shell: |
+            container="{{ volume_containers[volume] | default('') }}"
+            if [ -n "$container" ]; then
+              state=$(podman inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' "$container" 2>/dev/null || echo "missing")
+              if [ "$state" = "running" ]; then
+                podman stop "$container"
+                echo "stopped"
+              else
+                echo "not_running"
+              fi
+            else
+              echo "no_container"
+            fi
+          args:
+            executable: /bin/bash
+          register: restore_stop
+
+        - name: Ensure volume exists
+          ansible.builtin.command:
+            cmd: podman volume create {{ volume }}
+          register: vol_create
+          changed_when: "'exists' not in vol_create.stderr | default('')"
+
+        - name: Import backup into volume
+          ansible.builtin.shell: |
+            gunzip -c "{{ backup_file }}" | podman volume import {{ volume }} -
+          args:
+            executable: /bin/bash
+
+        - name: Restart container
+          ansible.builtin.shell: |
+            container="{{ volume_containers[volume] | default('') }}"
+            if [ "{{ restore_stop.stdout | default('') }}" = "stopped" ]; then
+              podman start "$container"
+            fi
+          args:
+            executable: /bin/bash
+          when: restore_stop.stdout | default('') == "stopped"
+
+        - name: Restore complete
+          ansible.builtin.debug:
+            msg: "Restored {{ volume }} from {{ backup_file }}"
