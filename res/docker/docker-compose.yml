@@ -13,16 +13,16 @@ services:
     profiles: ["data"]
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./config/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?Set POSTGRES_USER}"]
       interval: 15s
       timeout: 20s
       retries: 40
@@ -67,8 +67,8 @@ services:
     profiles: ["data"]
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-x}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-x}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?Set MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?Set MONGO_INITDB_ROOT_PASSWORD}
     ports:
       - "${MONGO_PORT:-27017}:27017"
     volumes:
@@ -112,7 +112,7 @@ services:
     command:
       - server
       - -dev
-      - -dev-root-token-id=${OPENBAO_DEV_ROOT_TOKEN_ID:-openbao-dev-token}
+      - -dev-root-token-id=${OPENBAO_DEV_ROOT_TOKEN_ID:?Set OPENBAO_DEV_ROOT_TOKEN_ID}
       - -dev-listen-address=0.0.0.0:8200
     environment:
       BAO_LOG_LEVEL: ${OPENBAO_LOG_LEVEL:-info}
@@ -132,11 +132,11 @@ services:
     command: start-dev
     environment:
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB:-keycloak}
-      KC_DB_USERNAME: ${POSTGRES_USER:-postgres}
-      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB:?Set KEYCLOAK_DB}
+      KC_DB_USERNAME: ${POSTGRES_USER:?Set POSTGRES_USER}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?Set KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD}
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_HEALTH_ENABLED: "true"
@@ -200,7 +200,7 @@ services:
       BASE_URL: ${SEARXNG_BASE_URL:-http://127.0.0.1:8888}
       GRANIAN_PORT: ${SEARXNG_PORT:-8888}
       GRANIAN_HOST: 0.0.0.0
-      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Set SEARXNG_SECRET}
       REDIS_URL: ${SEARXNG_REDIS_URL:-redis://searxng-redis:6380/0}
       LIMITER: ${SEARXNG_LIMITER:-true}
     ports:

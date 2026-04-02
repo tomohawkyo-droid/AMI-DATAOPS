@@ -123,7 +123,7 @@
         # --- Data Profile Health Checks ---
         - name: Wait for PostgreSQL
           ansible.builtin.shell: |
-            {{ container_runtime }} exec ami-postgres pg_isready -U postgres
+            {{ container_runtime }} exec ami-postgres pg_isready
           register: pg_health
           until: pg_health.rc == 0
           retries: 40
@@ -132,8 +132,8 @@
 
         - name: Ensure Keycloak database exists
           ansible.builtin.shell: |
-            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:-postgres} -tc "SELECT 1 FROM pg_database WHERE datname='${KEYCLOAK_DB:-keycloak}'" | grep -q 1 || \
-            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:-postgres} -c "CREATE DATABASE ${KEYCLOAK_DB:-keycloak}"
+            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:?Set POSTGRES_USER} -tc "SELECT 1 FROM pg_database WHERE datname='${KEYCLOAK_DB:?Set KEYCLOAK_DB}'" | grep -q 1 || \
+            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:?Set POSTGRES_USER} -c "CREATE DATABASE ${KEYCLOAK_DB:?Set KEYCLOAK_DB}"
           changed_when: false
 
         - name: Wait for Redis
@@ -204,8 +204,8 @@
             body:
               grant_type: password
               client_id: admin-cli
-              username: "{{ lookup('env', 'KEYCLOAK_ADMIN') | default('admin', true) }}"
-              password: "{{ lookup('env', 'KEYCLOAK_ADMIN_PASSWORD') | default('admin', true) }}"
+              username: "{{ lookup('env', 'KEYCLOAK_ADMIN') | mandatory }}"
+              password: "{{ lookup('env', 'KEYCLOAK_ADMIN_PASSWORD') | mandatory }}"
           register: kc_token
 
         - name: Set Keycloak provisioning facts
@@ -214,7 +214,7 @@
             kc_base: "http://localhost:{{ lookup('env', 'KEYCLOAK_PORT') | default('8082', true) }}"
             kc_realm: "{{ lookup('env', 'KEYCLOAK_REALM') | default('ami', true) }}"
             kc_client_id: "{{ lookup('env', 'KEYCLOAK_CLIENT_ID') | default('ami-portal', true) }}"
-            kc_portal_url: "{{ lookup('env', 'NEXTAUTH_URL') | default('https://192.168.50.66:3000', true) }}"
+            kc_portal_url: "{{ lookup('env', 'NEXTAUTH_URL') | mandatory }}"
 
         - name: Check if realm exists
           ansible.builtin.uri:
@@ -390,7 +390,7 @@
         # --- Data Profile Health Checks ---
         - name: Wait for PostgreSQL
           ansible.builtin.shell: |
-            {{ container_runtime }} exec ami-postgres pg_isready -U postgres
+            {{ container_runtime }} exec ami-postgres pg_isready
           register: pg_health
           until: pg_health.rc == 0
           retries: 40
@@ -499,7 +499,7 @@
         # --- Data Profile ---
         - name: Check PostgreSQL
           ansible.builtin.shell: |
-            {{ container_runtime }} exec ami-postgres pg_isready -U postgres 2>/dev/null
+            {{ container_runtime }} exec ami-postgres pg_isready 2>/dev/null
           register: pg_check
           failed_when: false
           changed_when: false
