@@ -17,6 +17,10 @@ AGENTS_RUFF := $(AGENTS_ROOT)/res/config/ruff.toml
 AGENTS_MYPY := $(AGENTS_ROOT)/res/config/mypy.toml
 AGENTS_BOOT := $(AGENTS_ROOT)/.boot-linux
 CI_SCRIPTS := $(AGENTS_ROOT)/projects/AMI-CI/scripts
+CI_LIB := $(AGENTS_ROOT)/projects/AMI-CI/lib
+
+# Contract compliance
+-include $(CI_LIB)/makefile_contract.mk
 
 # NEVER fallback to system uv - MUST use workspace-bootstrapped uv
 # Only system git is allowed (for initial AMI-AGENTS clone)
@@ -155,6 +159,9 @@ install-ci: ## CI install: Python only, no hooks
 .PHONY: install-package
 install-package: preflight ## Install Python dependencies
 	$(UV) sync --extra dev
+
+.PHONY: sync
+sync: install-package install-hooks ## Sync deps + reinstall hooks (run after AMI-CI changes)
 
 .PHONY: install-hooks
 install-hooks: preflight ## Generate native git hooks from .pre-commit-config.yaml
