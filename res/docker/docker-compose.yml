@@ -28,7 +28,7 @@ services:
       retries: 40
 
   redis:
-    image: redis:8.6.1
+    image: redis:8.6.2
     container_name: ami-redis
     profiles: ["data"]
     restart: unless-stopped
@@ -44,7 +44,7 @@ services:
       retries: 40
 
   dgraph:
-    image: dgraph/standalone:v25.3.0
+    image: dgraph/standalone:v25.3.2
     container_name: ami-dgraph
     profiles: ["data"]
     restart: unless-stopped
@@ -62,7 +62,7 @@ services:
       retries: 30
 
   mongo:
-    image: mongo:8.2.5
+    image: mongo:8.2.6
     container_name: ami-mongo
     profiles: ["data"]
     restart: unless-stopped
@@ -80,7 +80,7 @@ services:
       retries: 30
 
   prometheus:
-    image: prom/prometheus:v3.10.0
+    image: prom/prometheus:v3.11.2
     container_name: ami-prometheus
     profiles: ["data"]
     restart: unless-stopped
@@ -125,7 +125,7 @@ services:
       retries: 20
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.1
+    image: quay.io/keycloak/keycloak:26.2
     container_name: ami-keycloak
     profiles: ["secrets"]
     restart: unless-stopped
@@ -151,7 +151,7 @@ services:
       start_period: 30s
 
   vaultwarden:
-    image: vaultwarden/server:1.35.4
+    image: vaultwarden/server:1.35.7
     container_name: ami-vaultwarden
     profiles: ["secrets"]
     restart: unless-stopped
@@ -214,7 +214,7 @@ services:
       retries: 20
 
   searxng-redis:
-    image: redis:8.6.1
+    image: redis:8.6.2
     container_name: ami-searxng-redis
     profiles: ["dev"]
     restart: unless-stopped

@@ -289,8 +289,8 @@
 
         - name: Ensure Keycloak database exists
           ansible.builtin.shell: |
-            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:?Set POSTGRES_USER} -tc "SELECT 1 FROM pg_database WHERE datname='${KEYCLOAK_DB:?Set KEYCLOAK_DB}'" | grep -q 1 || \
-            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:?Set POSTGRES_USER} -c "CREATE DATABASE ${KEYCLOAK_DB:?Set KEYCLOAK_DB}"
+            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:?Set POSTGRES_USER} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${KEYCLOAK_DB:?Set KEYCLOAK_DB}'" | grep -q 1 || \
+            {{ container_runtime }} exec ami-postgres psql -U ${POSTGRES_USER:?Set POSTGRES_USER} -d postgres -c "CREATE DATABASE ${KEYCLOAK_DB:?Set KEYCLOAK_DB}"
           changed_when: false
 
         - name: Wait for Redis

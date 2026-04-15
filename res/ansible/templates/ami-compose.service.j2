@@ -10,11 +10,19 @@ WorkingDirectory={{ project_root }}/res/docker
 {% if runtime_bin_dir %}
 Environment=PATH={{ runtime_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 {% endif %}
+# Clean up stale state before starting:
+# 1. Remove stale default network (podman-compose leftover)
+# 2. Force-stop any containers in corrupted state from previous crash
+# 3. Force-remove pods in corrupted state
 ExecStartPre=-{{ container_runtime_path }} network rm -f docker_default
+ExecStartPre=-/bin/sh -c '{{ container_runtime_path }} ps -aq --filter "status=exited" --filter "status=dead" --filter "status=created" | xargs -r {{ container_runtime_path }} rm -f'
+ExecStartPre=-/bin/sh -c '{{ container_runtime_path }} pod ls -q --filter "status=exited" --filter "status=dead" --filter "status=created" | xargs -r {{ container_runtime_path }} pod rm -f'
 ExecStart={{ compose_cmd_path }} -f {{ compose_file }}{% for p in compose_profiles %} --profile {{ p }}{% endfor %} up --remove-orphans
 ExecStop={{ compose_cmd_path }} -f {{ compose_file }}{% for p in compose_profiles %} --profile {{ p }}{% endfor %} down
-Restart=on-failure
-RestartSec=10
+# Always restart — exit code 0 (clean stop) should not prevent restart.
+# The compose stack is a long-running service that should always be up.
+Restart=always
+RestartSec=15
 TimeoutStartSec=300
 TimeoutStopSec=120
 StandardOutput=journal
