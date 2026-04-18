@@ -28,3 +28,20 @@ extensions:
       command: ["{python}", "{binary}", "--help"]
       healthExpect: "restore"
       timeout: 5
+
+  - name: ami-serve
+    binary: projects/AMI-DATAOPS/ami/dataops/serve/main.py
+    description: Publish apps on Cloudflare Tunnel FQDNs
+    category: infra
+    features:
+      - deploy
+      - stop
+      - restart
+      - status
+      - route-dns
+      - logs
+    bannerPriority: 220
+    check:
+      command: ["{python}", "{binary}", "--help"]
+      healthExpect: "ami-serve"
+      timeout: 5
