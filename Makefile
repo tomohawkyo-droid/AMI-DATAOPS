@@ -56,6 +56,14 @@ help: ## Show this help
 	@echo "  compose-status       Show service status"
 	@echo "  ensure-profiles      Ensure specific profiles are running (PROFILES=data,secrets)"
 	@echo ""
+	@echo "Serve (Cloudflare Tunnel) targets:"
+	@echo "  serve-deploy         Render + start cloudflared tunnels"
+	@echo "  serve-stop           Stop cloudflared tunnels"
+	@echo "  serve-restart        Restart cloudflared tunnels"
+	@echo "  serve-status         Report tunnel + metrics state"
+	@echo "  serve-route-dns      Create Cloudflare CNAMEs for bound hostnames"
+	@echo "  serve-logs NAME=<t>  Tail journalctl for ami-serve-<t>.service"
+	@echo ""
 	@echo "Other targets:"
 	@echo "  clean                Remove build artifacts"
 	@echo "  clean-venv           Remove virtual environment"
@@ -233,6 +241,37 @@ compose-restart: ## Restart compose stack
 .PHONY: compose-status
 compose-status: ## Show compose stack status
 	$(ANSIBLE_COMPOSE) --tags status
+
+# =============================================================================
+# Serve (Cloudflare Tunnel) Targets
+# =============================================================================
+
+ANSIBLE_SERVE := $(ANSIBLE_PLAYBOOK) res/ansible/serve.yml
+
+.PHONY: serve-deploy
+serve-deploy: ## Render cloudflared configs + enable/start tunnel units
+	$(ANSIBLE_SERVE) --tags deploy
+
+.PHONY: serve-stop
+serve-stop: ## Stop all ami-serve tunnel units
+	$(ANSIBLE_SERVE) --tags stop
+
+.PHONY: serve-restart
+serve-restart: ## Restart all ami-serve tunnel units
+	$(ANSIBLE_SERVE) --tags restart
+
+.PHONY: serve-status
+serve-status: ## Report systemd + metrics state of tunnels
+	$(ANSIBLE_SERVE) --tags status
+
+.PHONY: serve-route-dns
+serve-route-dns: ## Create Cloudflare CNAMEs for configured hostnames
+	$(ANSIBLE_SERVE) --tags route-dns
+
+.PHONY: serve-logs
+serve-logs: ## Tail a single tunnel (usage: make serve-logs NAME=main)
+	@if [ -z "$(NAME)" ]; then echo "ERROR: Set NAME=<tunnel>"; exit 1; fi
+	journalctl --user -u ami-serve-$(NAME).service -f
 
 # =============================================================================
 # Volume Backup & Restore
