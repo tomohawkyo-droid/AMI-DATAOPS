@@ -20,7 +20,7 @@ ingress:
 {% if inst.origin_request is defined and inst.origin_request %}
     originRequest:
 {% for k, v in inst.origin_request.items() %}
-      {{ k }}: {{ v | to_json }}
+      {{ k }}: {{ v | tojson }}
 {% endfor %}
 {% endif %}
 {% endfor %}
