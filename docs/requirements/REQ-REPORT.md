@@ -41,6 +41,7 @@ Together they form the P2P reporting channel. Neither creates the other; each is
 - **R-REPORT-016**: Selection shall resolve symbolic links before pre-flight; a symlink pointing outside any declared candidate root shall be rejected with a clear error.
 - **R-REPORT-017**: Empty selection shall abort the send before the destination step, with exit code 2.
 - **R-REPORT-018**: In interactive mode, after the manifest + tarball are built and before the POST, the wizard shall render an archive-preview screen showing the compressed tar size, uncompressed aggregate size, and the list of files being shipped (up to 20 shown, with a `(+K more)` indicator for longer archives). The operator may abort (exit 0) or continue to the final confirmation.
+- **R-REPORT-019**: Between scope selection and the file-tree picker, the interactive wizard shall present a mandatory single-select time-window step with seven buckets (`all`, `1m`, `5m`, `15m`, `1h`, `8h`, `1d`) filtering candidates by POSIX mtime; each label shall display the count of qualifying files. A top-level `--since KEY` flag shall accept the same keys and bypass the interactive window step.
 
 ### 3. Sender — Destination
 

@@ -4,6 +4,10 @@ Drives the operator through every field `send` needs, filling gaps from
 sensible defaults (hostname for sender_id, built-in `reports` peer for
 destination) and prompting only for what cannot be inferred. Returns the
 CLI exit code directly so the caller can `sys.exit(wizard.run())`.
+
+Pure helpers (scope discovery, window counts, extension + window-key
+normalisation, archive summary formatting) live in `wizard_helpers.py`
+to keep this module focused on the interactive orchestration.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import os
 import re
 import socket
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,6 +40,7 @@ from ami.dataops.report.scanner import (
     CandidateFile,
     TreeEntry,
     expand_selection,
+    filter_by_window,
     scan_roots,
 )
 from ami.dataops.report.transport import (
@@ -45,6 +51,14 @@ from ami.dataops.report.transport import (
     post_bundle,
 )
 from ami.dataops.report.tui import pick_peer, pick_tree
+from ami.dataops.report.wizard_helpers import (
+    WINDOW_OPTIONS,
+    ArchiveSummary,
+    count_per_window,
+    find_scope_candidates,
+    render_archive_summary,
+    window_cutoff,
+)
 
 SENDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 EXIT_OK = 0
@@ -59,62 +73,12 @@ SecretPrompter = Callable[[str], str]
 PickScopeFn = Callable[[list[str], list[str]], list[str] | None]
 PickTreeFn = Callable[[list[TreeEntry]], list[TreeEntry]]
 PickPeerFn = Callable[[list[PeerEntry]], PeerEntry | None]
+PickWindowFn = Callable[[list[tuple[str, str, int]]], str | None]
+PreviewArchiveFn = Callable[[ArchiveSummary], bool]
 ConfirmFn = Callable[[str], bool]
 PostBundleFn = Callable[[PostContext], dict[str, object]]
 
-ARCHIVE_PREVIEW_FILE_LIMIT = 20
-BYTES_PER_KIB = 1024.0
-KIB_PER_MIB = 1024.0
-
-SCOPE_SKIP_DIRS: frozenset[str] = frozenset(
-    {
-        ".git",
-        ".venv",
-        ".venvs",
-        ".tox",
-        ".boot-linux",
-        ".gcloud",
-        ".runtime",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        "node_modules",
-        "__pycache__",
-        "build",
-        "dist",
-        "tmp",
-        "projects",
-    }
-)
-DEFAULT_SCOPE_ALLOWED_SUFFIXES: tuple[str, ...] = (".log",)
-
-
-def _normalize_extensions(raw: str) -> frozenset[str]:
-    """Parse a CSV list of extensions into a normalized frozenset.
-
-    Accepts `"log,txt"`, `".log,.txt"`, or `"LOG, TXT"`; returns the
-    lowercased, dot-prefixed frozenset (e.g. `{".log", ".txt"}`).
-    """
-    out: set[str] = set()
-    for item in raw.split(","):
-        trimmed = item.strip().lower()
-        if not trimmed:
-            continue
-        out.add(trimmed if trimmed.startswith(".") else f".{trimmed}")
-    return frozenset(out)
-
-
-class ArchiveSummary(BaseModel):
-    """Inputs to the archive-preview screen: compressed tar + per-file info."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    compressed_bytes: int
-    uncompressed_bytes: int
-    files: list[CandidateFile]
-
-
-PreviewArchiveFn = Callable[[ArchiveSummary], bool]
+WINDOW_CANCEL_SENTINEL = "__window_cancelled__"
 
 
 class WizardPrimitives(BaseModel):
@@ -125,6 +89,7 @@ class WizardPrimitives(BaseModel):
     prompt: Prompter
     secret_prompt: SecretPrompter
     pick_scope: PickScopeFn
+    pick_window: PickWindowFn
     pick_tree: PickTreeFn
     pick_peer: PickPeerFn
     preview_archive: PreviewArchiveFn
@@ -154,60 +119,24 @@ def _default_pick_scope(labels: list[str], preselected: list[str]) -> list[str] 
     return [str(item) for item in result]
 
 
-def _format_size(size_bytes: int) -> str:
-    kib = size_bytes / BYTES_PER_KIB
-    if kib < KIB_PER_MIB:
-        return f"{kib:.1f} KiB"
-    return f"{kib / KIB_PER_MIB:.1f} MiB"
-
-
-def find_scope_candidates(
-    root: Path, *, allowed_suffixes: tuple[str, ...] | None = None
-) -> list[tuple[Path, int]]:
-    """Walk `root`, return `[(abs_dir_path, direct_match_count), ...]`.
-
-    The returned list starts with `root` itself and its *total recursive*
-    count, followed by every descendant directory that directly contains
-    at least one file with an allowed suffix, each with its direct-children
-    count. Hidden/junk directories (.git, .venv, node_modules, projects,
-    etc) are pruned to keep the walk fast and the picker readable.
-    Operators wanting project logs pass the path via the custom-path
-    prompt or `--config`'s `extra_roots`.
-    """
-    suffixes = allowed_suffixes or DEFAULT_SCOPE_ALLOWED_SUFFIXES
-    counts: dict[Path, int] = {}
-    total = 0
-    abs_root = root.resolve()
-    for dirpath, dirnames, filenames in os.walk(abs_root, topdown=True):
-        dirnames[:] = [d for d in dirnames if d not in SCOPE_SKIP_DIRS]
-        hits = sum(1 for f in filenames if f.lower().endswith(suffixes))
-        if hits == 0:
-            continue
-        counts[Path(dirpath).resolve()] = hits
-        total += hits
-    result: list[tuple[Path, int]] = []
-    if total > 0:
-        result.append((abs_root, total))
-    result.extend((path, counts[path]) for path in sorted(counts) if path != abs_root)
-    return result
-
-
-def render_archive_summary(summary: ArchiveSummary) -> str:
-    """Format the archive-preview screen body. Pure function so tests can verify it."""
-    head = (
-        f"Archive:  {_format_size(summary.compressed_bytes)} compressed  /  "
-        f"{_format_size(summary.uncompressed_bytes)} uncompressed\n"
-        f"Files:    {len(summary.files)}\n\n"
-    )
-    shown = summary.files[:ARCHIVE_PREVIEW_FILE_LIMIT]
-    lines = [
-        f"  {candidate.relative_path:<60}{_format_size(candidate.size_bytes)}"
-        for candidate in shown
+def _default_pick_window(options: list[tuple[str, str, int]]) -> str | None:
+    items = [
+        {
+            "id": key,
+            "label": label,
+            "description": f"({count})",
+            "is_header": False,
+        }
+        for key, label, count in options
     ]
-    extras = len(summary.files) - len(shown)
-    if extras > 0:
-        lines.append(f"  (+{extras} more)")
-    return head + "\n".join(lines) + "\n\nReview complete?"
+    chosen = dialogs.select(items, title="Time window: show logs modified since")
+    if chosen is None:
+        return None
+    if isinstance(chosen, dict):
+        raw_id = chosen.get("id")
+        return str(raw_id) if isinstance(raw_id, str) else None
+    identifier = getattr(chosen, "id", None)
+    return identifier if isinstance(identifier, str) else None
 
 
 def _default_preview_archive(summary: ArchiveSummary) -> bool:
@@ -221,6 +150,7 @@ def default_primitives() -> WizardPrimitives:
         prompt=_default_prompt,
         secret_prompt=_default_secret_prompt,
         pick_scope=_default_pick_scope,
+        pick_window=_default_pick_window,
         pick_tree=pick_tree,
         pick_peer=pick_peer,
         preview_archive=_default_preview_archive,
@@ -352,6 +282,23 @@ def _is_under(root: Path, path: Path) -> bool:
     return True
 
 
+def _resolve_window(
+    entries: list[TreeEntry],
+    pick_window: PickWindowFn,
+    since_key_override: str | None,
+    now_epoch: float,
+) -> str:
+    """Return the selected window key or `WINDOW_CANCEL_SENTINEL` on cancel."""
+    if since_key_override is not None:
+        return since_key_override
+    counts = count_per_window(entries, now_epoch)
+    options = [(key, label, counts[key]) for key, label, _ in WINDOW_OPTIONS]
+    picked = pick_window(options)
+    if picked is None:
+        return WINDOW_CANCEL_SENTINEL
+    return picked
+
+
 class SendRequest(BaseModel):
     """Bundled inputs to `_send` so the signature stays under the arg cap."""
 
@@ -434,34 +381,12 @@ def _send(request: SendRequest) -> int:
     return EXIT_OK
 
 
-def run(
-    config_path: Path | None = None,
-    primitives: WizardPrimitives | None = None,
-    extensions: frozenset[str] | None = None,
+def _finalize_send(
+    cfg: ReportConfig,
+    prim: WizardPrimitives,
+    entries: list[TreeEntry],
+    sender_id: str,
 ) -> int:
-    """Run the interactive wizard. Returns the CLI exit code.
-
-    `extensions` (when set) overrides the built-in `.log`-only allowlist
-    for this run, including the scope picker's discovery suffixes and
-    the per-file pre-flight check. Supplied by `--extensions` on the CLI.
-    """
-    prim = primitives or default_primitives()
-    hostname = socket.gethostname() or "anonymous"
-    initial_cfg = _load_or_default_config(config_path, hostname)
-    sender_id = _resolve_sender_id(initial_cfg, prim.prompt)
-    cfg = ReportConfig(
-        sender=initial_cfg.sender.model_copy(update={"sender_id": sender_id}),
-        peers=initial_cfg.peers,
-    )
-    suffixes = tuple(sorted(extensions)) if extensions is not None else None
-    roots = _resolve_scope(cfg, prim.prompt, prim.pick_scope, suffixes)
-    if not roots:
-        print("no scan roots chosen; nothing to report", file=sys.stderr)
-        return EXIT_OK
-    entries = scan_roots(roots, allowed_extensions=extensions)
-    if not entries:
-        print("no candidate files found under the chosen roots", file=sys.stderr)
-        return EXIT_OK
     selected = prim.pick_tree(entries)
     if not selected:
         return EXIT_OK
@@ -483,3 +408,36 @@ def run(
             token=token,
         )
     )
+
+
+def run(
+    config_path: Path | None = None,
+    primitives: WizardPrimitives | None = None,
+    extensions: frozenset[str] | None = None,
+    since_key: str | None = None,
+) -> int:
+    """Run the interactive wizard. Returns the CLI exit code."""
+    prim = primitives or default_primitives()
+    hostname = socket.gethostname() or "anonymous"
+    initial_cfg = _load_or_default_config(config_path, hostname)
+    sender_id = _resolve_sender_id(initial_cfg, prim.prompt)
+    cfg = ReportConfig(
+        sender=initial_cfg.sender.model_copy(update={"sender_id": sender_id}),
+        peers=initial_cfg.peers,
+    )
+    suffixes = tuple(sorted(extensions)) if extensions is not None else None
+    roots = _resolve_scope(cfg, prim.prompt, prim.pick_scope, suffixes)
+    if not roots:
+        print("no scan roots chosen; nothing to report", file=sys.stderr)
+        return EXIT_OK
+    entries = scan_roots(roots, allowed_extensions=extensions)
+    now_epoch = time.time()
+    resolved_window = _resolve_window(entries, prim.pick_window, since_key, now_epoch)
+    if resolved_window == WINDOW_CANCEL_SENTINEL:
+        return EXIT_OK
+    cutoff = window_cutoff(resolved_window, now_epoch)
+    entries = filter_by_window(entries, cutoff)
+    if not entries:
+        print("no candidate files in the selected window", file=sys.stderr)
+        return EXIT_OK
+    return _finalize_send(cfg, prim, entries, sender_id)

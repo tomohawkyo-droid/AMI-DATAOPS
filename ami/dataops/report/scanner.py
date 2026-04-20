@@ -35,6 +35,7 @@ class CandidateFile(BaseModel):
     preflight: PreflightStatus
     reject_detail: str | None = None
     depth: int = 0
+    mtime_epoch: float = 0.0
 
     @property
     def toggleable(self) -> bool:
@@ -121,13 +122,15 @@ def _scan_directory(
                 allowed_extensions=opts.allowed_extensions,
             )
             rel = child.relative_to(opts.rel_base).as_posix()
+            stat = child.stat()
             candidate = CandidateFile(
                 absolute_path=child,
                 relative_path=rel,
-                size_bytes=child.stat().st_size,
+                size_bytes=stat.st_size,
                 preflight=preflight,
                 reject_detail=detail,
                 depth=depth + 1,
+                mtime_epoch=stat.st_mtime,
             )
             files_here.append(candidate)
             descendant_files += 1
@@ -176,14 +179,16 @@ def scan_roots(
                 max_file_bytes=max_file_bytes,
                 allowed_extensions=allowed_extensions,
             )
+            stat = root.stat()
             entries.append(
                 CandidateFile(
                     absolute_path=root,
                     relative_path=root.name,
-                    size_bytes=root.stat().st_size,
+                    size_bytes=stat.st_size,
                     preflight=preflight,
                     reject_detail=detail,
                     depth=0,
+                    mtime_epoch=stat.st_mtime,
                 )
             )
             continue
@@ -268,3 +273,44 @@ def _file_is_under_folder(file_entry: CandidateFile, folder: FolderEntry) -> boo
     except ValueError:
         return False
     return file_entry.absolute_path != folder.absolute_path
+
+
+def filter_by_window(
+    entries: list[TreeEntry], since_epoch: float | None
+) -> list[TreeEntry]:
+    """Drop CandidateFile entries older than `since_epoch` and prune empty folders.
+
+    `since_epoch=None` is a pass-through (no filter). Folder entries whose
+    subtree holds zero qualifying files are removed; remaining folders have
+    their descendant counts recomputed so the TUI labels stay accurate.
+    """
+    if since_epoch is None:
+        return list(entries)
+    kept_files: dict[Path, CandidateFile] = {
+        entry.absolute_path: entry
+        for entry in entries
+        if isinstance(entry, CandidateFile) and entry.mtime_epoch >= since_epoch
+    }
+    output: list[TreeEntry] = []
+    for entry in entries:
+        if isinstance(entry, CandidateFile):
+            if entry.absolute_path in kept_files:
+                output.append(entry)
+            continue
+        descendants = [
+            f
+            for f in kept_files.values()
+            if _file_is_under_folder(f, entry) or f.absolute_path == entry.absolute_path
+        ]
+        if not descendants:
+            continue
+        toggleable = sum(1 for f in descendants if f.toggleable)
+        output.append(
+            entry.model_copy(
+                update={
+                    "descendant_file_count": len(descendants),
+                    "toggleable_descendant_count": toggleable,
+                }
+            )
+        )
+    return output

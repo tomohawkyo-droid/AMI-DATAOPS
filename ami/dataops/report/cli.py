@@ -18,7 +18,7 @@ import yaml
 
 from ami.dataops.intake import validation
 from ami.dataops.report import manifest as manifest_mod
-from ami.dataops.report import tui, wizard
+from ami.dataops.report import tui, wizard, wizard_helpers
 from ami.dataops.report.bundling import build_bundle_tarball
 from ami.dataops.report.config import PeerEntry, ReportConfig, load_report_config
 from ami.dataops.report.scanner import (
@@ -53,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated allowlist override (e.g. log,txt,json). "
         "Applies to scope discovery + per-file pre-flight. Defaults to 'log'.",
     )
+    parser.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="time window key: all | 1m | 5m | 15m | 1h | 8h | 1d. "
+        "Filters candidates by file mtime; skips the interactive picker.",
+    )
     sub = parser.add_subparsers(dest="command")
 
     send = sub.add_parser("send", help="select + sign + POST a bundle")
@@ -77,10 +84,17 @@ def main(argv: list[str] | None = None) -> int:
         return wizard.run()
     args = parser.parse_args(effective)
     extensions = (
-        wizard._normalize_extensions(args.extensions) if args.extensions else None
+        wizard_helpers.normalize_extensions(args.extensions)
+        if args.extensions
+        else None
     )
+    try:
+        since_key = wizard_helpers.normalize_window_key(args.since)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_INVALID_ARGS
     if args.command is None:
-        return wizard.run(extensions=extensions)
+        return wizard.run(extensions=extensions, since_key=since_key)
     handler = _DISPATCH.get(args.command)
     if handler is None:
         print(f"error: unknown command {args.command}", file=sys.stderr)

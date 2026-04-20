@@ -343,9 +343,27 @@ Auditors verify a chain across rotations by walking `audit/*.log` in chronologic
 
 ## 8. TUI flow
 
-Three screens, all reusing existing primitives from `ami/cli_components/`.
+Four screens, all reusing existing primitives from `ami/cli_components/`.
 
-### 8.1 File selection (`SelectionDialog`, multi-select)
+### 8.1 Time window (`dialogs.select`, single-select)
+
+Between scope picking and file selection, the wizard presents a seven-bucket window picker. Counts (qualifying files per bucket) are computed from the post-scope scan using POSIX mtime on each `CandidateFile`; `all` is preselected so hitting Enter preserves pre-feature behaviour.
+
+```
+┌─ Time window: show logs modified since ────────────────────────────┐
+│ > [ ] All time                                              (414)  │
+│   [ ] Last 1 minute                                           (3)  │
+│   [ ] Last 5 minutes                                          (8)  │
+│   [ ] Last 15 minutes                                        (24)  │
+│   [ ] Last 1 hour                                            (67)  │
+│   [ ] Last 8 hours                                          (189)  │
+│   [ ] Last 1 day                                            (301)  │
+└ ↑/↓: navigate, Enter: ok, Esc: cancel ────────────────────────────┘
+```
+
+`--since KEY` (top-level CLI flag, same seven keys) skips this screen; an empty post-filter tree short-circuits to exit 0.
+
+### 8.2 File selection (`SelectionDialog`, multi-select)
 
 ```
 ┌─ Select log files to report ──────────────────────────────────────┐
@@ -363,7 +381,7 @@ Three screens, all reusing existing primitives from `ami/cli_components/`.
 
 Directories render as group headers so space-toggling a header selects every non-disabled child under it — the existing SelectionDialog group-toggle behaviour. Pre-flight failures render as dimmed rows with a suffix like `(not .log)` or `(binary)` and cannot be toggled.
 
-### 8.2 Peer selection (`dialogs.select`, single-select)
+### 8.3 Peer selection (`dialogs.select`, single-select)
 
 ```
 ┌─ Choose destination ──────────────────────────────────────────────┐
@@ -375,7 +393,7 @@ Directories render as group headers so space-toggling a header selects every non
 
 Peers whose bearer token env var is unset render dimmed and cannot be selected.
 
-### 8.3 Confirmation (`dialogs.confirm`)
+### 8.4 Confirmation (`dialogs.confirm`)
 
 ```
 ┌─ Confirm report ──────────────────────────────────────────────────┐

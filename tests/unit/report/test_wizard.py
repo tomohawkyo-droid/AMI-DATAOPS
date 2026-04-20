@@ -8,11 +8,13 @@ goes well, and short-circuits cleanly on empty selections / cancels.
 
 from __future__ import annotations
 
+import os
+import time as _time_mod
 from pathlib import Path
 
 import pytest
 
-from ami.dataops.report import wizard
+from ami.dataops.report import wizard, wizard_helpers
 from ami.dataops.report.config import PeerEntry
 from ami.dataops.report.defaults import DEFAULT_PEER_NAME
 from ami.dataops.report.scanner import (
@@ -37,6 +39,7 @@ class _StubInputs:
             "sender_input": "",
             "scope_answers": [],
             "scope_labels": None,
+            "window_key": "all",
             "select_all_tree": True,
             "pick_peer_name": None,
             "secret_values": {},
@@ -110,11 +113,19 @@ def _make_post(stub: _StubInputs) -> wizard.PostBundleFn:
     return _post
 
 
+def _make_pick_window(stub: _StubInputs) -> wizard.PickWindowFn:
+    def _pick_window(_options: list[tuple[str, str, int]]) -> str | None:
+        return stub.window_key
+
+    return _pick_window
+
+
 def _build_primitives(stub: _StubInputs) -> wizard.WizardPrimitives:
     return wizard.WizardPrimitives(
         prompt=_make_prompt(stub),
         secret_prompt=_make_secret(stub),
         pick_scope=_make_pick_scope(stub),
+        pick_window=_make_pick_window(stub),
         pick_tree=_make_pick_tree(stub),
         pick_peer=_make_pick_peer(stub),
         preview_archive=lambda _summary: stub.preview,
@@ -305,20 +316,22 @@ class TestFindScopeCandidates:
 
 class TestNormalizeExtensions:
     def test_csv_with_dots(self) -> None:
-        assert wizard._normalize_extensions(".log,.txt") == frozenset({".log", ".txt"})
+        assert wizard_helpers.normalize_extensions(".log,.txt") == frozenset(
+            {".log", ".txt"}
+        )
 
     def test_csv_without_dots(self) -> None:
-        assert wizard._normalize_extensions("log,txt,json") == frozenset(
+        assert wizard_helpers.normalize_extensions("log,txt,json") == frozenset(
             {".log", ".txt", ".json"}
         )
 
     def test_mixed_case_and_whitespace(self) -> None:
-        assert wizard._normalize_extensions(" LOG , Txt ") == frozenset(
+        assert wizard_helpers.normalize_extensions(" LOG , Txt ") == frozenset(
             {".log", ".txt"}
         )
 
     def test_empty_entries_skipped(self) -> None:
-        assert wizard._normalize_extensions("log,,") == frozenset({".log"})
+        assert wizard_helpers.normalize_extensions("log,,") == frozenset({".log"})
 
 
 class TestProjectsSkipped:
@@ -346,7 +359,50 @@ class TestFindScopeCandidatesWithSuffixOverride:
                 tmp_path, allowed_suffixes=(".log", ".txt", ".md")
             )
         )
-        assert override[tmp_path.resolve()] == _OVERRIDE_SUFFIX_COUNT
+        expected = _OVERRIDE_SUFFIX_COUNT
+        assert override[tmp_path.resolve()] == expected
+
+
+class TestNormalizeWindowKey:
+    def test_none_returns_none(self) -> None:
+        assert wizard_helpers.normalize_window_key(None) is None
+
+    def test_valid_keys_roundtrip(self) -> None:
+        for key in ["all", "1m", "5m", "15m", "1h", "8h", "1d"]:
+            assert wizard_helpers.normalize_window_key(key) == key
+
+    def test_uppercase_and_whitespace_normalized(self) -> None:
+        assert wizard_helpers.normalize_window_key("  15M  ") == "15m"
+
+    def test_unknown_raises(self) -> None:
+        with pytest.raises(ValueError, match="unknown --since value"):
+            wizard_helpers.normalize_window_key("42m")
+
+
+_ALL_FILES = 3
+_WITHIN_5M = 2
+_WITHIN_1H = 2
+
+
+class TestCountPerWindow:
+    def test_counts_follow_mtime_buckets(self, tmp_path: Path) -> None:
+        now = _time_mod.time()
+        (tmp_path / "now.log").write_text("1\n")
+        os.utime(tmp_path / "now.log", (now, now))
+        (tmp_path / "two_min_ago.log").write_text("2\n")
+        os.utime(tmp_path / "two_min_ago.log", (now - 120, now - 120))
+        (tmp_path / "one_hour_ago.log").write_text("3\n")
+        one_hour_plus = now - 3700  # just past the 1h cutoff boundary
+        os.utime(tmp_path / "one_hour_ago.log", (one_hour_plus, one_hour_plus))
+        entries = scan_roots([tmp_path])
+        counts = wizard.count_per_window(entries, now)
+        assert counts["all"] == _ALL_FILES
+        assert counts["1m"] == 1
+        assert counts["5m"] == _WITHIN_5M
+        assert counts["15m"] == _WITHIN_5M
+        assert counts["1h"] == _WITHIN_1H
+        assert counts["8h"] == _ALL_FILES
+        assert counts["1d"] == _ALL_FILES
 
 
 class TestRenderArchiveSummary:

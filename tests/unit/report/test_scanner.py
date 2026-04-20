@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from ami.dataops.report.scanner import (
@@ -9,6 +10,7 @@ from ami.dataops.report.scanner import (
     FolderEntry,
     expand_selection,
     files_only,
+    filter_by_window,
     scan_roots,
 )
 
@@ -89,6 +91,54 @@ class TestScanRoots:
         names = {f.relative_path.rsplit("/", 1)[-1] for f in files}
         assert "link.log" not in names
         assert "real.log" in names
+
+
+class TestMtimePopulation:
+    def test_candidate_files_carry_mtime(self, tmp_path: Path) -> None:
+        (tmp_path / "a.log").write_text("alpha\n")
+        files = files_only(scan_roots([tmp_path]))
+        assert len(files) == 1
+        assert files[0].mtime_epoch > 0
+
+
+class TestFilterByWindow:
+    def test_none_cutoff_returns_input_unchanged(self, tmp_path: Path) -> None:
+        (tmp_path / "a.log").write_text("alpha\n")
+        entries = scan_roots([tmp_path])
+        assert filter_by_window(entries, None) == entries
+
+    def test_drops_stale_files_and_prunes_empty_folders(self, tmp_path: Path) -> None:
+        fresh = tmp_path / "fresh.log"
+        fresh.write_text("new\n")
+        (tmp_path / "stale_dir").mkdir()
+        stale = tmp_path / "stale_dir" / "old.log"
+        stale.write_text("old\n")
+        old_timestamp = fresh.stat().st_mtime - 3600  # 1h ago
+        os.utime(stale, (old_timestamp, old_timestamp))
+        entries = scan_roots([tmp_path])
+        cutoff = fresh.stat().st_mtime - 60  # keep only last minute
+        kept = filter_by_window(entries, cutoff)
+        kept_paths = {e.relative_path for e in kept}
+        assert "fresh.log" in {p for p in kept_paths if p.endswith(".log")}
+        assert not any("old.log" in p for p in kept_paths)
+        assert not any(
+            isinstance(e, FolderEntry) and e.relative_path == "stale_dir" for e in kept
+        )
+
+    def test_root_folder_count_recomputed(self, tmp_path: Path) -> None:
+        expected_kept = 2
+        (tmp_path / "a.log").write_text("new\n")
+        (tmp_path / "b.log").write_text("also new\n")
+        (tmp_path / "c.log").write_text("old\n")
+        fresh_mt = (tmp_path / "a.log").stat().st_mtime
+        os.utime(tmp_path / "c.log", (fresh_mt - 7200, fresh_mt - 7200))
+        entries = scan_roots([tmp_path])
+        cutoff = fresh_mt - 60
+        kept = filter_by_window(entries, cutoff)
+        root_folder = next(
+            e for e in kept if isinstance(e, FolderEntry) and e.depth == 0
+        )
+        assert root_folder.descendant_file_count == expected_kept
 
 
 class TestExpandSelection:
