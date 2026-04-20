@@ -4,22 +4,36 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ami.dataops.report.scanner import CandidateFile
+from ami.dataops.report.scanner import CandidateFile, FolderEntry
 from ami.dataops.report.tui import (
     _build_items,
+    _entry_id,
     _extract_selection,
+    _file_label,
+    _folder_label,
     _size_label,
     resolve_selection_from_defaults,
 )
 
 
-def _candidate(rel: str, *, ok: bool = True) -> CandidateFile:
+def _file(rel: str, *, ok: bool = True, depth: int = 0) -> CandidateFile:
     return CandidateFile(
         absolute_path=Path(f"/tmp/{rel}"),
         relative_path=rel,
         size_bytes=1024,
         preflight="ok" if ok else "ext_not_allowed",
         reject_detail=None if ok else "bad ext",
+        depth=depth,
+    )
+
+
+def _folder(rel: str, *, total: int, ok: int, depth: int = 0) -> FolderEntry:
+    return FolderEntry(
+        absolute_path=Path(f"/tmp/{rel}"),
+        relative_path=rel,
+        descendant_file_count=total,
+        toggleable_descendant_count=ok,
+        depth=depth,
     )
 
 
@@ -31,57 +45,76 @@ class TestSizeLabel:
         assert _size_label(5 * 1024 * 1024) == "5.0 MiB"
 
 
-class TestBuildItems:
-    def test_emits_headers_per_directory(self) -> None:
-        cands = [
-            _candidate("nested/a.log"),
-            _candidate("nested/b.log"),
-            _candidate("c.log"),
-        ]
-        items = _build_items(cands)
-        headers = [item for item in items if item.get("is_header")]
-        ids = {h["id"] for h in headers}
-        assert "_header_nested" in ids
-        assert "_header_." in ids
+class TestLabels:
+    def test_folder_label_shows_count(self) -> None:
+        label, detail = _folder_label(_folder("nested", total=3, ok=3, depth=1))
+        assert label.endswith("[dir] nested/")
+        assert label.startswith("  ")
+        assert detail == "3 files"
 
-    def test_rejected_candidates_disabled(self) -> None:
-        items = _build_items([_candidate("ok.log"), _candidate("bad.exe", ok=False)])
-        entries = {item["label"]: item for item in items if not item.get("is_header")}
-        assert entries["ok.log"].get("disabled") is False
-        assert entries["bad.exe"].get("disabled") is True
+    def test_folder_label_shows_rejected_count(self) -> None:
+        _, detail = _folder_label(_folder("nested", total=5, ok=3))
+        assert "2 rejected" in detail
+
+    def test_file_label_indents_by_depth(self) -> None:
+        label, _ = _file_label(_file("nested/a.log", depth=2))
+        assert label.startswith("    ")
+        assert label.endswith("a.log")
+
+
+class TestBuildItems:
+    def test_folders_are_not_headers(self) -> None:
+        items = _build_items(
+            [
+                _folder("nested", total=1, ok=1),
+                _file("nested/a.log", depth=1),
+            ]
+        )
+        folder_item = items[0]
+        assert folder_item["is_header"] is False
+        assert folder_item["disabled"] is False
+
+    def test_rejected_file_disabled(self) -> None:
+        items = _build_items([_file("bad.exe", ok=False)])
+        assert items[0]["disabled"] is True
+
+    def test_folder_with_zero_toggleable_disabled(self) -> None:
+        items = _build_items([_folder("empty", total=0, ok=0)])
+        assert items[0]["disabled"] is True
 
 
 class TestExtractSelection:
-    def test_returns_matching_candidates_in_dialog_order(self) -> None:
-        cands = [_candidate("a.log"), _candidate("b.log"), _candidate("c.log")]
-        raw = [
-            {"id": "/tmp/c.log"},
-            {"id": "/tmp/a.log"},
+    def test_filters_by_toggleable_and_preserves_order(self) -> None:
+        entries = [
+            _folder("nested", total=2, ok=2),
+            _file("nested/a.log", depth=1),
+            _file("nested/b.log", depth=1),
         ]
-        result = _extract_selection(raw, cands)
-        assert [c.relative_path for c in result] == ["c.log", "a.log"]
+        raw = [
+            {"id": _entry_id(entries[2])},
+            {"id": _entry_id(entries[0])},
+        ]
+        result = _extract_selection(raw, entries)
+        ids = [_entry_id(r) for r in result]
+        assert ids == [_entry_id(entries[2]), _entry_id(entries[0])]
 
-    def test_ignores_non_list_input(self) -> None:
-        assert _extract_selection(None, [_candidate("a.log")]) == []
-
-    def test_skips_unknown_ids(self) -> None:
-        cands = [_candidate("a.log")]
-        raw = [{"id": "/tmp/nope.log"}]
-        assert _extract_selection(raw, cands) == []
+    def test_non_list_returns_empty(self) -> None:
+        assert _extract_selection(None, [_file("a.log")]) == []
 
 
 class TestResolveFromDefaults:
     def test_matches_by_relative_path(self) -> None:
-        cands = [_candidate("a.log"), _candidate("b.log"), _candidate("c.log")]
-        defaults = {"files": ["a.log", "c.log"]}
-        result = resolve_selection_from_defaults(defaults, cands)
-        assert sorted(c.relative_path for c in result) == ["a.log", "c.log"]
+        entries = [_file("a.log"), _file("nested/b.log", depth=1)]
+        result = resolve_selection_from_defaults(
+            {"files": ["a.log", "nested/b.log"]}, entries
+        )
+        assert {c.relative_path for c in result} == {"a.log", "nested/b.log"}
 
-    def test_empty_defaults_returns_empty(self) -> None:
-        cands = [_candidate("a.log")]
-        assert resolve_selection_from_defaults({}, cands) == []
+    def test_matches_by_filename_only(self) -> None:
+        entries = [_file("nested/trace.ndjson", depth=1)]
+        result = resolve_selection_from_defaults({"files": ["trace.ndjson"]}, entries)
+        assert len(result) == 1
 
-    def test_disallowed_candidates_not_selected(self) -> None:
-        cands = [_candidate("a.log", ok=False)]
-        defaults = {"files": ["a.log"]}
-        assert resolve_selection_from_defaults(defaults, cands) == []
+    def test_ignores_disabled_entries(self) -> None:
+        entries = [_file("bad.exe", ok=False)]
+        assert resolve_selection_from_defaults({"files": ["bad.exe"]}, entries) == []

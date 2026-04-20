@@ -18,10 +18,15 @@ import yaml
 
 from ami.dataops.intake import validation
 from ami.dataops.report import manifest as manifest_mod
-from ami.dataops.report import tui
+from ami.dataops.report import tui, wizard
 from ami.dataops.report.bundling import build_bundle_tarball
 from ami.dataops.report.config import PeerEntry, ReportConfig, load_report_config
-from ami.dataops.report.scanner import CandidateFile, scan_roots
+from ami.dataops.report.scanner import (
+    CandidateFile,
+    TreeEntry,
+    expand_selection,
+    scan_roots,
+)
 from ami.dataops.report.transport import (
     AuthRejected,
     NetworkError,
@@ -59,9 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    effective = sys.argv[1:] if argv is None else argv
+    if not effective:
+        return wizard.run()
+    parser = build_parser()
+    args = parser.parse_args(effective)
     if args.command is None:
-        args.command = "send"
+        return wizard.run()
     handler = _DISPATCH.get(args.command)
     if handler is None:
         print(f"error: unknown command {args.command}", file=sys.stderr)
@@ -84,15 +93,18 @@ def _resolve_roots(config: ReportConfig) -> list[Path]:
 
 def _cmd_send(args: argparse.Namespace) -> int:
     config = load_report_config(args.config)
-    candidates = scan_roots(_resolve_roots(config))
+    entries = scan_roots(_resolve_roots(config))
     bundle_id = str(uuid_utils.uuid7())
-    selected_and_peer = _pick_selection_and_peer(args, config, candidates, bundle_id)
+    selected_and_peer = _pick_selection_and_peer(args, config, entries, bundle_id)
     if selected_and_peer is None:
         return EXIT_OK
     selected, peer = selected_and_peer
-    source_root = _common_source_root(selected)
+    expanded = expand_selection(selected, entries)
+    if not expanded:
+        return EXIT_OK
+    source_root = _common_source_root(expanded)
     try:
-        for candidate in selected:
+        for candidate in expanded:
             validation.probe_text_content(candidate.absolute_path)
     except validation.ValidationRejected as exc:
         print(f"local pre-flight failed: {exc}", file=sys.stderr)
@@ -100,7 +112,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
     manifest = manifest_mod.build_manifest(
         sender_id=config.sender.sender_id,
         source_root=source_root,
-        files=[c.absolute_path for c in selected],
+        files=[c.absolute_path for c in expanded],
         bundle_id=bundle_id,
     )
     manifest_bytes = manifest_mod.canonical_manifest_bytes(manifest)
@@ -124,11 +136,12 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 def _cmd_preview(args: argparse.Namespace) -> int:
     config = load_report_config(args.config)
-    candidates = scan_roots(_resolve_roots(config))
-    ok_count = sum(1 for c in candidates if c.toggleable)
+    entries = scan_roots(_resolve_roots(config))
+    files = [e for e in entries if isinstance(e, CandidateFile)]
+    ok_count = sum(1 for c in files if c.toggleable)
     print(f"sender_id:       {config.sender.sender_id}")
-    print(f"candidate files: {ok_count} ok / {len(candidates)} total")
-    for candidate in candidates:
+    print(f"candidate files: {ok_count} ok / {len(files)} total")
+    for candidate in files:
         status = "ok" if candidate.toggleable else candidate.preflight
         print(f"  [{status:<18}] {candidate.relative_path} ({candidate.size_bytes} B)")
     print(f"peers:           {[p.name for p in config.peers]}")
@@ -152,12 +165,12 @@ def _cmd_peers(args: argparse.Namespace) -> int:
 def _pick_selection_and_peer(
     args: argparse.Namespace,
     config: ReportConfig,
-    candidates: list[CandidateFile],
+    entries: list[TreeEntry],
     bundle_id: str,
-) -> tuple[list[CandidateFile], PeerEntry] | None:
+) -> tuple[list[TreeEntry], PeerEntry] | None:
     if args.ci:
-        return _ci_selection_and_peer(args, config, candidates)
-    result = tui.run_interactive(config, candidates, bundle_id)
+        return _ci_selection_and_peer(args, config, entries)
+    result = tui.run_interactive(config, entries, bundle_id)
     if result is None:
         return None
     return result.selected, result.peer
@@ -166,8 +179,8 @@ def _pick_selection_and_peer(
 def _ci_selection_and_peer(
     args: argparse.Namespace,
     config: ReportConfig,
-    candidates: list[CandidateFile],
-) -> tuple[list[CandidateFile], PeerEntry] | None:
+    entries: list[TreeEntry],
+) -> tuple[list[TreeEntry], PeerEntry] | None:
     defaults_path = args.defaults or config.sender.default_ci_defaults
     if defaults_path is None:
         print("error: --ci requires --defaults FILE", file=sys.stderr)
@@ -180,7 +193,7 @@ def _ci_selection_and_peer(
     if not isinstance(peer_name, str):
         print("error: defaults file missing string 'peer'", file=sys.stderr)
         return None
-    selected = tui.resolve_selection_from_defaults(raw, candidates)
+    selected = tui.resolve_selection_from_defaults(raw, entries)
     return selected, config.peer(peer_name)
 
 

@@ -1,11 +1,10 @@
-"""Interactive TUI for ami-report: pick files, pick peer, confirm.
+"""Interactive TUI helpers for ami-report.
 
-Reuses the shared SelectionDialog + dialogs facade from ami-agents core;
-introduces no new TUI primitives. Three screens in order:
-
-  1. File multi-select   -- SelectionDialog with group-per-directory
-  2. Peer single-select  -- dialogs.select over dataops_report_peers
-  3. Confirmation        -- dialogs.confirm showing manifest summary
+Every tree entry — folder or file — is rendered as a regular toggleable
+row in SelectionDialog, indented by its depth so the hierarchy reads
+naturally. Folders carry a "(N files)" annotation and include the whole
+subtree at send time (expansion happens in scanner.expand_selection, not
+here). Files render with their size; preflight rejects render disabled.
 """
 
 from __future__ import annotations
@@ -21,20 +20,25 @@ from ami.cli_components.selection_dialog import (
     SelectionDialogConfig,
 )
 from ami.dataops.report.config import PeerEntry, ReportConfig
-from ami.dataops.report.scanner import CandidateFile, group_by_directory
-
-
-class TUIResult(BaseModel):
-    """Outcome of the interactive flow: selected files + destination peer."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    selected: list[CandidateFile]
-    peer: PeerEntry
-
+from ami.dataops.report.scanner import (
+    CandidateFile,
+    FolderEntry,
+    TreeEntry,
+    expand_selection,
+)
 
 BYTES_PER_KIB = 1024.0
 KIB_PER_MIB = 1024.0
+INDENT_STEP = "  "
+
+
+class TUIResult(BaseModel):
+    """Outcome of the interactive flow: selected entries + destination peer."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    selected: list[TreeEntry]
+    peer: PeerEntry
 
 
 def _size_label(size_bytes: int) -> str:
@@ -44,71 +48,81 @@ def _size_label(size_bytes: int) -> str:
     return f"{kib / KIB_PER_MIB:.1f} MiB"
 
 
-def _build_items(
-    candidates: list[CandidateFile],
-) -> list[dict[str, object]]:
+def _folder_label(entry: FolderEntry) -> tuple[str, str]:
+    indent = INDENT_STEP * entry.depth
+    label = f"{indent}[dir] {entry.relative_path}/"
+    detail = f"{entry.descendant_file_count} files"
+    if entry.descendant_file_count != entry.toggleable_descendant_count:
+        skipped = entry.descendant_file_count - entry.toggleable_descendant_count
+        detail += f" ({skipped} rejected by pre-flight)"
+    return label, detail
+
+
+def _file_label(entry: CandidateFile) -> tuple[str, str]:
+    indent = INDENT_STEP * entry.depth
+    label = f"{indent}{entry.relative_path.rsplit('/', 1)[-1]}"
+    detail = _size_label(entry.size_bytes)
+    if entry.preflight != "ok":
+        detail = f"{detail} -- {entry.preflight}"
+    return label, detail
+
+
+def _entry_id(entry: TreeEntry) -> str:
+    prefix = "folder:" if isinstance(entry, FolderEntry) else "file:"
+    return f"{prefix}{entry.absolute_path.as_posix()}"
+
+
+def _build_items(entries: list[TreeEntry]) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
-    groups = group_by_directory(candidates)
-    for directory, files in groups.items():
-        header_label = f"[dir] {directory}" if directory != "." else "[dir] /"
+    for entry in entries:
+        if isinstance(entry, FolderEntry):
+            label, detail = _folder_label(entry)
+        else:
+            label, detail = _file_label(entry)
         items.append(
             {
-                "id": f"_header_{directory}",
-                "label": header_label,
-                "value": directory,
-                "is_header": True,
+                "id": _entry_id(entry),
+                "label": label,
+                "description": detail,
+                "value": entry,
+                "is_header": False,
+                "disabled": not entry.toggleable,
             }
         )
-        for candidate in files:
-            detail = _size_label(candidate.size_bytes)
-            if candidate.preflight != "ok":
-                detail = f"{detail} -- {candidate.preflight}"
-            items.append(
-                {
-                    "id": candidate.absolute_path.as_posix(),
-                    "label": candidate.relative_path,
-                    "description": detail,
-                    "value": candidate,
-                    "is_header": False,
-                    "disabled": not candidate.toggleable,
-                }
-            )
     return items
 
 
-def _extract_selection(
-    raw: object, candidates: list[CandidateFile]
-) -> list[CandidateFile]:
+def _extract_selection(raw: object, entries: list[TreeEntry]) -> list[TreeEntry]:
     if not isinstance(raw, list):
         return []
-    by_path: dict[str, CandidateFile] = {
-        c.absolute_path.as_posix(): c for c in candidates if c.toggleable
+    by_id: dict[str, TreeEntry] = {
+        _entry_id(entry): entry for entry in entries if entry.toggleable
     }
-    chosen: list[CandidateFile] = []
+    chosen: list[TreeEntry] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
         identifier = item.get("id")
-        if isinstance(identifier, str) and identifier in by_path:
-            chosen.append(by_path[identifier])
+        if isinstance(identifier, str) and identifier in by_id:
+            chosen.append(by_id[identifier])
     return chosen
 
 
-def pick_files(candidates: list[CandidateFile]) -> list[CandidateFile]:
-    """Render the multi-select file tree and return the operator's choices."""
-    if not candidates:
+def pick_tree(entries: list[TreeEntry]) -> list[TreeEntry]:
+    """Render the mixed folder+file tree and return the operator's checks."""
+    if not entries:
         return []
-    items = _build_items(candidates)
+    items = _build_items(entries)
     dialog = SelectionDialog(
         items=cast("list[DialogItem]", items),
         config=SelectionDialogConfig(
-            title="Select files to report",
+            title="Select files + folders for the report",
             multi=True,
             width=100,
-            max_height=18,
+            max_height=20,
         ),
     )
-    return _extract_selection(dialog.run(), candidates)
+    return _extract_selection(dialog.run(), entries)
 
 
 def pick_peer(peers: list[PeerEntry]) -> PeerEntry | None:
@@ -129,14 +143,14 @@ def pick_peer(peers: list[PeerEntry]) -> PeerEntry | None:
 
 
 def confirm_send(
-    selected: list[CandidateFile], peer: PeerEntry, bundle_id: str
+    selected_files: list[CandidateFile], peer: PeerEntry, bundle_id: str
 ) -> bool:
-    """Show a summary screen; return True if the operator confirms."""
-    total_bytes = sum(c.size_bytes for c in selected)
+    """Show a summary screen; return True when the operator confirms."""
+    total_bytes = sum(c.size_bytes for c in selected_files)
     message = (
         f"Destination: {peer.name} ({peer.endpoint})\n"
         f"Bundle id:   {bundle_id}\n"
-        f"Files:       {len(selected)}\n"
+        f"Files:       {len(selected_files)}\n"
         f"Total size:  {_size_label(total_bytes)}\n"
     )
     return bool(dialogs.confirm(message, title="Send report?"))
@@ -144,35 +158,39 @@ def confirm_send(
 
 def run_interactive(
     config: ReportConfig,
-    candidates: list[CandidateFile],
+    entries: list[TreeEntry],
     bundle_id: str,
 ) -> TUIResult | None:
-    """Drive the three-screen flow; return None on cancel/empty-selection."""
-    selected = pick_files(candidates)
+    """Drive the three-screen flow; return None on cancel / empty selection."""
+    selected = pick_tree(entries)
     if not selected:
         return None
     peer = pick_peer(config.peers)
     if peer is None:
         return None
-    if not confirm_send(selected, peer, bundle_id):
+    expanded = expand_selection(selected, entries)
+    if not confirm_send(expanded, peer, bundle_id):
         return None
     return TUIResult(selected=selected, peer=peer)
 
 
 def resolve_selection_from_defaults(
     defaults: dict[str, object],
-    candidates: list[CandidateFile],
-) -> list[CandidateFile]:
+    entries: list[TreeEntry],
+) -> list[TreeEntry]:
     """Non-interactive path: `--ci --defaults FILE` lists relative paths."""
     raw = defaults.get("files", [])
     if not isinstance(raw, list):
         return []
     wanted = {str(entry) for entry in raw if isinstance(entry, str)}
-    by_path = {c.absolute_path.as_posix(): c for c in candidates if c.toggleable}
-    chosen = [c for c in candidates if c.relative_path in wanted and c.toggleable]
-    if len(chosen) == len(wanted):
-        return chosen
-    for key, value in by_path.items():
-        if key in wanted and value not in chosen:
-            chosen.append(value)
-    return chosen
+    matches: list[TreeEntry] = []
+    for candidate in entries:
+        if not candidate.toggleable:
+            continue
+        if candidate.relative_path in wanted:
+            matches.append(candidate)
+            continue
+        short = candidate.relative_path.rsplit("/", 1)[-1]
+        if short in wanted:
+            matches.append(candidate)
+    return matches
